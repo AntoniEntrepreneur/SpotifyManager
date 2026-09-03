@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and specs live as markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+Issues and specs live as GitHub issues (repo: `AntoniEntrepreneur/SpotifyManager`). See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
