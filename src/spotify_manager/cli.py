@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import report
 from .commands import dedupe_cmd, redact_cmd
 from .errors import SpotifyManagerError
 
@@ -22,13 +23,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     dedupe = subparsers.add_parser(
         "dedupe",
-        help="review saved albums for duplicate editions (currently read-only)",
+        help="review saved albums for duplicate editions and approve a cleanup",
         description=(
             "Fetch the saved-album library (from the local snapshot when it is still "
             "fresh), work out which albums are duplicate editions of each other, and "
-            "then open a report in the browser showing every group, its members, the "
-            "proposed keeper, the key that grouped them and the decorations that were "
-            "ignored to match. Nothing is modified."
+            "then serve a report showing every group, its members, the proposed "
+            "keeper, the key that grouped them and the decorations that were ignored "
+            "to match. Tick exactly which albums to keep, skip any group you "
+            "disagree with, and approve. The run waits for that decision with no "
+            "timeout, and can be abandoned with Ctrl-C. Nothing is deleted: this "
+            "version resolves the decisions into the exact set of albums that would "
+            "be removed, prints it, and stops."
         ),
     )
     dedupe.add_argument(
@@ -39,7 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
     dedupe.add_argument(
         "--no-browser",
         action="store_true",
-        help="write and archive the report without opening it in a browser",
+        help="serve the report without opening it in a browser",
+    )
+    dedupe.add_argument(
+        "--port",
+        type=int,
+        default=report.DEFAULT_PORT,
+        metavar="PORT",
+        help=(
+            "local port to serve the approval page on "
+            f"(default: {report.DEFAULT_PORT}; the page is bound to 127.0.0.1 only)"
+        ),
     )
     dedupe.add_argument(
         "--verbose",
@@ -72,5 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\nAborted.", file=sys.stderr)
+        # A last-resort net: an interrupt during a phase that has no cleaner answer
+        # of its own still ends as a sentence, not a traceback.
+        print("\nAborted. Nothing was changed.", file=sys.stderr)
         return 130

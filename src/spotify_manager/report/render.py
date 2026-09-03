@@ -12,9 +12,16 @@ point at the Spotify CDN URLs the library listing already handed us, which costs
 Spotify API request and keeps the file small enough to archive on every run. The
 footer says so, so a reader years later knows why the art may be missing.
 
-The document is read-only by construction: nothing here submits anything, and the
-only interactivity is client-side search and sorting. Per-album approval controls
-arrive in later work and hang off the ids and `data-` attributes written here.
+The document has two modes, and the difference is one argument. Rendered with no
+`approve_url` it stays a read-only record -- the form the archived copy of every run
+takes, because an archive that could still submit something would be a lie. Rendered
+with an `approve_url` it grows the approval controls: a keep checkbox on every album,
+pre-checked to match the plan's own proposal, a skip switch on every group, and one
+button that posts the decisions back to the waiting process. Submitting without
+touching anything therefore reproduces the plan exactly.
+
+That URL is a path, never an origin, so the page can only ever post back to whatever
+served it -- which is the loopback approval server and nothing else.
 """
 
 from __future__ import annotations
@@ -257,6 +264,168 @@ footer p { margin: 6px 0; }
 footer .note { color: var(--faint); font-size: 12px; }
 """
 
+#: Everything the approval controls add. Appended to `_STYLE` only when the report is
+#: rendered interactive, so the archived copy carries no styling for controls it has
+#: deliberately not got.
+_APPROVAL_STYLE = """
+/* ---------- approval controls ---------- */
+.approving .wrap { padding-bottom: 168px; }
+.approving .controls { top: 0; }
+
+.skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding: 5px 11px 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.skip:hover { border-color: #46465a; color: var(--text); }
+.skip input { accent-color: var(--remove); width: 15px; height: 15px; margin: 0; }
+.group-head .size { margin-left: 0; }
+.group.skipped { border-color: rgba(224, 85, 95, 0.45); }
+.group.skipped .albums, .group.skipped .meta { opacity: 0.4; }
+.group.skipped .skip { border-color: var(--remove); color: var(--remove); }
+.group.skipped .skip-state::after { content: "skipped — no change"; }
+.skip-state::after { content: "Skip this group"; }
+
+.pick {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(10, 10, 13, 0.86);
+  backdrop-filter: blur(3px);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.pick input { accent-color: var(--keep); width: 16px; height: 16px; margin: 0; }
+.pick:hover { border-color: #46465a; }
+.album.kept .pick { border-color: rgba(29, 185, 84, 0.6); color: #7ee2a4; }
+.album.dropped .pick { border-color: rgba(224, 85, 95, 0.45); color: var(--remove); }
+.pick-state::after { content: "remove"; }
+.album.kept .pick-state::after { content: "keep"; }
+/* A skipped group changes nothing, so its ticks must not claim otherwise. */
+.group.skipped .pick-state::after { content: "no change"; }
+
+/* While approving, the ring follows the checkbox rather than the original plan. */
+.approving .album.keeper { box-shadow: none; }
+.approving .album { opacity: 1; }
+.approving .album.kept {
+  border-color: rgba(29, 185, 84, 0.6);
+  background: linear-gradient(180deg, rgba(29, 185, 84, 0.09), var(--surface-2) 60%);
+}
+.approving .album.dropped {
+  border-color: rgba(224, 85, 95, 0.35);
+  background: var(--surface-2);
+}
+.approving .album.dropped .cover { filter: grayscale(0.5) brightness(0.8); }
+.approving .album.kept .cover { filter: none; }
+.approving .group.skipped .album .pick { pointer-events: none; opacity: 0.5; }
+
+.warn-all {
+  display: none;
+  margin: 10px 0 0;
+  color: var(--remove);
+  font-size: 12.5px;
+}
+.group.empty-keep:not(.skipped) .warn-all { display: block; }
+
+.approve-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 24px;
+  background: rgba(18, 18, 23, 0.96);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+}
+.approve-bar .inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+.tally { font-size: 13.5px; color: var(--muted); }
+.tally strong { color: var(--text); font-size: 16px; }
+.tally .rm { color: var(--remove); }
+.approve-bar .spacer { flex: 1 1 auto; }
+button.approve {
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 650;
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 22px;
+  background: var(--keep);
+  color: #06210f;
+  cursor: pointer;
+}
+button.approve:hover { filter: brightness(1.08); }
+button.approve:disabled { background: var(--line); color: var(--faint); cursor: default; }
+button.reset {
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+button.reset:hover { color: var(--text); border-color: #46465a; }
+.bar-note { flex-basis: 100%; color: var(--faint); font-size: 12px; margin: 0; }
+.bar-note.error { color: var(--remove); }
+
+.done {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 11, 0.94);
+  padding: 24px;
+  text-align: center;
+}
+.done .panel {
+  max-width: 520px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 34px;
+}
+.done h2 { margin: 0 0 10px; font-size: 20px; }
+.done p { color: var(--muted); margin: 8px 0 0; font-size: 14px; }
+"""
+
 _SCRIPT = """
 (function () {
   var list = document.getElementById("groups");
@@ -311,13 +480,152 @@ _SCRIPT = """
 })();
 """
 
+#: The approval behaviour. `__APPROVE_URL__` is substituted with the path the page
+#: posts to; it is a path and not an origin, so the page can only ever answer the
+#: server that served it.
+_APPROVAL_SCRIPT = """
+(function () {
+  var APPROVE_URL = "__APPROVE_URL__";
+  var list = document.getElementById("groups");
+  var bar = document.getElementById("approve-bar");
+  if (!list || !bar) return;
 
-def render_plan_html(plan: DedupePlan) -> str:
+  var groups = Array.prototype.slice.call(list.querySelectorAll(".group"));
+  var button = document.getElementById("approve");
+  var reset = document.getElementById("reset");
+  var tally = document.getElementById("tally");
+  var note = document.getElementById("bar-note");
+  var defaultNote = note.textContent;
+
+  function boxes(group) {
+    return Array.prototype.slice.call(group.querySelectorAll("input.keep-box"));
+  }
+  function skipBox(group) { return group.querySelector("input.skip-box"); }
+
+  function update() {
+    var removing = 0, skipped = 0, wipes = 0;
+    groups.forEach(function (group) {
+      var skip = skipBox(group).checked;
+      group.classList.toggle("skipped", skip);
+      var kept = 0;
+      boxes(group).forEach(function (box) {
+        var card = box.closest(".album");
+        var keep = skip || box.checked;
+        card.classList.toggle("kept", keep);
+        card.classList.toggle("dropped", !keep);
+        if (box.checked) kept++;
+        if (!skip && !box.checked) removing++;
+      });
+      if (skip) skipped++;
+      var wipe = !skip && kept === 0;
+      group.classList.toggle("empty-keep", wipe);
+      if (wipe) wipes++;
+    });
+    tally.innerHTML =
+      "<strong class=\\"rm\\">" + removing + "</strong> album" +
+      (removing === 1 ? "" : "s") + " will be removed &nbsp;·&nbsp; " +
+      skipped + " group" + (skipped === 1 ? "" : "s") + " skipped";
+    button.textContent = removing
+      ? "Approve — remove " + removing + " album" + (removing === 1 ? "" : "s")
+      : "Approve — remove nothing";
+    button.dataset.removing = removing;
+    button.dataset.wipes = wipes;
+  }
+
+  function payload() {
+    var out = {};
+    groups.forEach(function (group) {
+      var index = group.dataset.groupIndex;
+      if (skipBox(group).checked) {
+        out[index] = { action: "skip", keep: [] };
+        return;
+      }
+      var keep = [];
+      boxes(group).forEach(function (box) {
+        if (box.checked) keep.push(box.dataset.albumId);
+      });
+      out[index] = { action: "resolve", keep: keep };
+    });
+    return { groups: out };
+  }
+
+  function fail(message) {
+    note.textContent = message;
+    note.classList.add("error");
+    button.disabled = false;
+  }
+
+  function done() {
+    var panel = document.createElement("div");
+    panel.className = "done";
+    panel.innerHTML =
+      "<div class=\\"panel\\"><h2>Decisions submitted</h2>" +
+      "<p>You can close this tab. The result is printed in the terminal you " +
+      "started the run from.</p></div>";
+    document.body.appendChild(panel);
+  }
+
+  function submit() {
+    if (Number(button.dataset.wipes) > 0 &&
+        !window.confirm("Some groups have no album ticked to keep, so every " +
+                        "edition in them would be removed. Submit anyway?")) {
+      return;
+    }
+    button.disabled = true;
+    note.classList.remove("error");
+    note.textContent = "Submitting…";
+    fetch(APPROVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload())
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+        done();
+      });
+    }).catch(function (error) {
+      fail("Could not submit: " + error.message + ". The run is still waiting; " +
+           "reload this page and try again.");
+      note.textContent += " (" + defaultNote + ")";
+    });
+  }
+
+  list.addEventListener("change", function (event) {
+    if (event.target.matches("input.keep-box, input.skip-box")) update();
+  });
+  button.addEventListener("click", submit);
+  reset.addEventListener("click", function () {
+    groups.forEach(function (group) {
+      skipBox(group).checked = false;
+      boxes(group).forEach(function (box) {
+        box.checked = box.dataset.proposedKeep === "true";
+      });
+    });
+    update();
+  });
+  update();
+})();
+"""
+
+
+def render_plan_html(plan: DedupePlan, *, approve_url: str | None = None) -> str:
     """Render a dedupe plan as one self-contained HTML document.
 
-    Pure: no filesystem, no network, no clock. Nothing about the returned document
-    is interactive beyond client-side search and sorting -- it states a proposal.
+    Pure: no filesystem, no network, no clock.
+
+    Args:
+        plan: what to render.
+        approve_url: the path the approval controls post decisions to. Omit it (the
+            default) and the document is a read-only record with no way to submit
+            anything -- which is what every archived copy must be. Give it a path,
+            and the report grows per-album keep checkboxes pre-checked to match the
+            plan, a per-group skip switch, and a single approve button.
     """
+    interactive = approve_url is not None
+    style = _STYLE + (_APPROVAL_STYLE if interactive else "")
+    script = _SCRIPT
+    if interactive:
+        script += _APPROVAL_SCRIPT.replace("__APPROVE_URL__", escape(approve_url or "", quote=True))
     parts: list[str] = [
         "<!doctype html>",
         '<html lang="en">',
@@ -325,26 +633,27 @@ def render_plan_html(plan: DedupePlan) -> str:
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         "<title>Duplicate saved albums</title>",
-        f"<style>{_STYLE}</style>",
+        f"<style>{style}</style>",
         "</head>",
-        "<body>",
+        f'<body class="{"approving" if interactive else "reporting"}">',
         '<div class="wrap">',
-        _header(plan),
+        _header(plan, interactive),
         _controls(),
-        _groups(plan),
-        _footer(plan),
+        _groups(plan, interactive),
+        _footer(plan, interactive),
         "</div>",
-        f"<script>{_SCRIPT}</script>",
+        _approve_bar(plan) if interactive else "",
+        f"<script>{script}</script>",
         "</body>",
         "</html>",
     ]
-    return "\n".join(parts) + "\n"
+    return "\n".join(part for part in parts if part) + "\n"
 
 
 # --------------------------------------------------------------------------- header
 
 
-def _header(plan: DedupePlan) -> str:
+def _header(plan: DedupePlan, interactive: bool = False) -> str:
     stats = [
         ("albums scanned", plan.total_albums_scanned, ""),
         ("duplicate groups", len(plan.groups), ""),
@@ -356,12 +665,18 @@ def _header(plan: DedupePlan) -> str:
         f'<span class="l">{escape(label)}</span></div>'
         for label, value, css in stats
     )
+    subtitle = (
+        "Every album is ticked as the plan proposes: the richest edition in each "
+        "group is kept and the rest are removed. Change any tick, skip any group "
+        "you disagree with, then approve at the bottom of the page."
+        if interactive
+        else "A proposal, not an action. Nothing has been deleted; the keeper in "
+        "each group is the richest edition the ranking table found."
+    )
     return (
         "<header>"
         "<h1>Duplicate saved albums</h1>"
-        '<p class="subtitle">A proposal, not an action. Nothing has been deleted; '
-        "the keeper in each group is the richest edition the ranking table found."
-        "</p>"
+        f'<p class="subtitle">{subtitle}</p>'
         f'<div class="stats">{tiles}</div>'
         "</header>"
     )
@@ -392,27 +707,42 @@ def _controls() -> str:
 # --------------------------------------------------------------------------- groups
 
 
-def _groups(plan: DedupePlan) -> str:
+def _groups(plan: DedupePlan, interactive: bool = False) -> str:
     if not plan.groups:
         return (
             '<div class="empty"><strong>No duplicate editions found.</strong><br>'
             "Every saved album is the only edition of itself in this library.</div>"
         )
-    cards = "\n".join(_group_card(index, group) for index, group in enumerate(plan.groups))
+    cards = "\n".join(
+        _group_card(index, group, interactive) for index, group in enumerate(plan.groups)
+    )
     return (
         f'<main id="groups">{cards}</main>'
         '<div class="no-results" id="no-results" hidden>No group matches that search.</div>'
     )
 
 
-def _group_card(index: int, group: DuplicateGroup) -> str:
+def _group_card(index: int, group: DuplicateGroup, interactive: bool = False) -> str:
     keeper = group.keeper
     size = len(group.members)
     searchable = " ".join(
         [group.key.normalized_title, group.key.album_type]
         + [f"{m.album.name} {m.album.artist_names}" for m in group.members]
     ).lower()
-    albums = "\n".join(_album_card(member) for member in group.members)
+    albums = "\n".join(_album_card(member, interactive) for member in group.members)
+    skip = (
+        f'<label class="skip" title="Skip this group entirely: nothing in it changes">'
+        f'<input type="checkbox" class="skip-box" data-group-index="{index}">'
+        f'<span class="skip-state"></span></label>'
+        if interactive
+        else ""
+    )
+    warning = (
+        '<p class="warn-all">Nothing is ticked to keep in this group, so every '
+        "edition of it would be removed.</p>"
+        if interactive
+        else ""
+    )
     return (
         f'<section class="group" id="group-{index}"'
         f' data-group-index="{index}"'
@@ -426,9 +756,11 @@ def _group_card(index: int, group: DuplicateGroup) -> str:
         f"<h2>{escape(keeper.album.name)}</h2>"
         f'<span class="artist">{escape(keeper.album.artist_names)}</span>'
         f'<span class="size">{size} {_plural(size, "edition")}</span>'
+        f"{skip}"
         "</div>"
         f'<div class="meta">{_group_meta(group)}</div>'
         f'<div class="albums">{albums}</div>'
+        f"{warning}"
         "</section>"
     )
 
@@ -457,13 +789,26 @@ def _chips(decorations: tuple[str, ...]) -> str:
     ) + "</span>"
 
 
-def _album_card(member: AlbumJudgement) -> str:
+def _album_card(member: AlbumJudgement, interactive: bool = False) -> str:
     album = member.album
+    # When the reviewer can change the outcome, the badge stops claiming what will
+    # happen and states what the *plan* proposed; the checkbox says what will happen.
+    keep_label, remove_label = ("proposed keeper", "duplicate") if interactive else ("keep", "remove")
     badge = (
-        '<span class="badge keep">keep</span>'
+        f'<span class="badge keep">{keep_label}</span>'
         if member.is_keeper
-        else '<span class="badge remove">remove</span>'
+        else f'<span class="badge remove">{remove_label}</span>'
     )
+    pick = (
+        f'<label class="pick" title="Tick to keep this album">'
+        f'<input type="checkbox" class="keep-box" data-album-id="{escape(album.id)}" '
+        f'data-proposed-keep="{"true" if member.is_keeper else "false"}"'
+        f'{" checked" if member.is_keeper else ""}>'
+        f'<span class="pick-state"></span></label>'
+        if interactive
+        else ""
+    )
+    state = (" kept" if member.is_keeper else " dropped") if interactive else ""
     cover = _cover(album)
     decorations = (
         f'<div class="dec">ignored here: '
@@ -477,11 +822,12 @@ def _album_card(member: AlbumJudgement) -> str:
     )
     rank_label = CATEGORY_LABELS.get(member.edition_category, member.edition_category)
     return (
-        f'<article class="album {"keeper" if member.is_keeper else "removal"}"'
+        f'<article class="album {"keeper" if member.is_keeper else "removal"}{state}"'
         f' data-album-id="{escape(album.id)}"'
         f' data-keeper="{"true" if member.is_keeper else "false"}"'
         f' data-rank="{member.edition_rank}"'
         f' data-search="{escape(f"{album.name} {album.artist_names}".lower())}">'
+        f"{pick}"
         f"{cover}"
         f"{badge}"
         f'<div class="title">{escape(album.name)}</div>'
@@ -546,7 +892,36 @@ def _plural(count: int, singular: str, plural: str | None = None) -> str:
 # --------------------------------------------------------------------------- footer
 
 
-def _footer(plan: DedupePlan) -> str:
+def _approve_bar(plan: DedupePlan) -> str:
+    """The single action that approves the whole reviewed plan.
+
+    Fixed to the bottom of the window rather than the end of the document: with
+    dozens of groups, a button at the end of the page is a button nobody finds.
+    """
+    if not plan.groups:
+        return (
+            '<div class="approve-bar" id="approve-bar"><div class="inner">'
+            '<span class="tally" id="tally">Nothing to review.</span>'
+            '<span class="spacer"></span>'
+            '<button class="reset" id="reset" type="button" hidden>Reset</button>'
+            '<button class="approve" id="approve" type="button">Approve — remove nothing</button>'
+            '<p class="bar-note" id="bar-note">Nothing has been deleted yet.</p>'
+            "</div></div>"
+        )
+    return (
+        '<div class="approve-bar" id="approve-bar"><div class="inner">'
+        '<span class="tally" id="tally"></span>'
+        '<span class="spacer"></span>'
+        '<button class="reset" id="reset" type="button">Reset to the proposal</button>'
+        '<button class="approve" id="approve" type="button"></button>'
+        '<p class="bar-note" id="bar-note">Nothing has been deleted yet. Closing this '
+        "tab does not cancel the run — the terminal keeps waiting until you approve, "
+        "or until you interrupt it there.</p>"
+        "</div></div>"
+    )
+
+
+def _footer(plan: DedupePlan, interactive: bool = False) -> str:
     if plan.excluded_reasons:
         reasons = ", ".join(
             f"{count} {escape(reason)}" for reason, count in sorted(plan.excluded_reasons.items())
@@ -569,7 +944,13 @@ def _footer(plan: DedupePlan) -> str:
         "<footer>"
         f"<p>{excluded}</p>"
         f"<p>{suppressed}</p>"
-        "<p>Nothing has been deleted. This report states a proposal only.</p>"
+        + (
+            "<p>Nothing has been deleted yet. Your decisions are submitted from the "
+            "bar at the bottom of this page.</p>"
+            if interactive
+            else "<p>Nothing has been deleted. This report states a proposal only.</p>"
+        )
+        +
         '<p class="note">All styling and behaviour is embedded in this file; the only '
         "external references are the cover images, loaded from Spotify&rsquo;s CDN "
         "(i.scdn.co), which may not render offline or years from now.</p>"

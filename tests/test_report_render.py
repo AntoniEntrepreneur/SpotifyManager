@@ -188,3 +188,69 @@ def test_rendering_cannot_reach_the_filesystem_the_network_or_the_clock():
     forbidden = ("pathlib", "os", "time", "datetime", "requests", "urllib", "webbrowser")
     for name in imported:
         assert name.split(".")[0] not in forbidden, f"render.py imports {name!r}"
+
+
+# --------------------------------------------------------------------------
+# The approval mode: the same document, plus the controls that submit it
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def approving_html(real_plan: DedupePlan) -> str:
+    return render_plan_html(real_plan, approve_url="/approve")
+
+
+def test_the_archived_report_has_no_way_to_submit_anything(real_html: str):
+    """An archive is a record. A record that could still approve a deletion is a lie."""
+    assert "keep-box" not in real_html
+    assert "skip-box" not in real_html
+    assert "fetch(" not in real_html
+    assert "/approve" not in real_html
+
+
+def test_every_album_offers_a_keep_checkbox(real_plan: DedupePlan, approving_html: str):
+    assert approving_html.count('class="keep-box"') == real_plan.albums_in_groups
+    for group in real_plan.groups:
+        for member in group.members:
+            assert f'data-album-id="{member.album.id}" data-proposed-keep=' in approving_html
+
+
+def test_the_boxes_start_ticked_exactly_as_the_plan_proposes(
+    real_plan: DedupePlan, approving_html: str
+):
+    """Submitting without touching anything must reproduce the plan, so the ticks
+    must start as the plan's own proposal -- one keeper per group, nothing else."""
+    assert approving_html.count('data-proposed-keep="true" checked') == len(real_plan.groups)
+    assert approving_html.count('data-proposed-keep="false">') == real_plan.proposed_removal_count
+    assert 'data-proposed-keep="false" checked' not in approving_html
+
+
+def test_every_group_offers_a_skip_control(real_plan: DedupePlan, approving_html: str):
+    assert approving_html.count('class="skip-box"') == len(real_plan.groups)
+    for index in range(len(real_plan.groups)):
+        assert f'class="skip-box" data-group-index="{index}"' in approving_html
+
+
+def test_one_button_approves_the_whole_reviewed_plan(approving_html: str):
+    assert approving_html.count('id="approve"') == 1
+    assert 'id="approve-bar"' in approving_html
+
+
+def test_the_page_only_ever_posts_back_to_whatever_served_it(approving_html: str):
+    """A path, never an origin: the decisions cannot be aimed anywhere else."""
+    assert 'var APPROVE_URL = "/approve";' in approving_html
+    hosts = set(re.findall(r"https?://([^/\"'\s]+)", approving_html))
+    assert hosts == {"i.scdn.co"}, hosts
+    assert "<script src" not in approving_html
+    assert "<link " not in approving_html
+
+
+def test_the_reviewer_is_told_that_closing_the_tab_does_not_cancel(approving_html: str):
+    assert "Closing this tab does not cancel the run" in approving_html
+
+
+def test_an_empty_plan_still_renders_an_approvable_document():
+    html = render_plan_html(DedupePlan(total_albums_scanned=12), approve_url="/approve")
+    assert "No duplicate editions found." in html
+    assert 'id="approve"' in html
+    assert html.strip().endswith("</html>")
