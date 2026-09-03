@@ -26,15 +26,20 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Fetch the saved-album library (from the local snapshot when it is still "
             "fresh), work out which albums are duplicate editions of each other, and "
-            "print the proposal: every group, its members, the proposed keeper, the "
-            "key that grouped them and the decorations that were ignored to match. "
-            "Nothing is modified."
+            "then open a report in the browser showing every group, its members, the "
+            "proposed keeper, the key that grouped them and the decorations that were "
+            "ignored to match. Nothing is modified."
         ),
     )
     dedupe.add_argument(
         "--refresh",
         action="store_true",
         help="bypass the local snapshot and fetch the library from Spotify",
+    )
+    dedupe.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="write and archive the report without opening it in a browser",
     )
     dedupe.add_argument(
         "--verbose",

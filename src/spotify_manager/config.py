@@ -48,6 +48,11 @@ class Config:
     def snapshot_path(self) -> Path:
         return self.state_dir / "library_snapshot.json"
 
+    @property
+    def reports_dir(self) -> Path:
+        """Where every run archives its rendered report. Local state, gitignored."""
+        return self.state_dir / "reports"
+
 
 def state_dir() -> Path:
     """Return the local state directory, creating it if needed."""
