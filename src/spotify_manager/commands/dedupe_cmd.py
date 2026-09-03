@@ -1,13 +1,17 @@
-"""The `dedupe` subcommand.
+"""The `dedupe` subcommand: plan, then approve, then -- for now -- stop.
 
-The command is still read-only: it loads the library (cache or API), computes the
-plan, prints a summary, and opens a report in the browser. Nothing is deleted, and
-nothing can be -- approval and the deletion path arrive in later work and slot in
-after `plan`.
+The run loads the library (cache or API), computes the plan, prints it, archives a
+read-only copy of the report, then serves an interactive copy on a loopback port and
+blocks until the reviewer submits their decisions. Those decisions are resolved into
+an exact set of album ids, which is printed and nothing more. No album is deleted,
+no restore file is written and no ledger is updated: executing the resolution and
+recording the skipped groups are separate pieces of work, and keeping them separate
+is the point -- the mapping from ticks to deletions is built and verified with
+nothing irreversible attached to it.
 
-The printing and rendering live here rather than in the planner or the renderer
-because both of those must stay pure functions returning data; deciding where the
-bytes go -- stdout, an archive file, a browser -- is this module's job alone.
+Everything impure lives here. The planner, the resolver and the renderer are pure
+functions over data; deciding where the bytes go -- stdout, an archive file, a
+socket, a browser -- is this module's job alone.
 """
 
 from __future__ import annotations
@@ -16,11 +20,13 @@ import argparse
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from ..config import Config, load_config
 from ..dedupe.models import DedupePlan, DuplicateGroup, snapshot_from_raw
 from ..dedupe.planner import plan as build_plan
-from ..report import render_plan_html
+from ..dedupe.resolve import ApprovalPayload, Resolution, resolve_decisions
+from ..report import APPROVE_PATH, ApprovalServer, render_plan_html
 from .library import load_library
 
 
@@ -45,16 +51,79 @@ def run(args: argparse.Namespace) -> int:
     print(format_plan(dedupe_plan))
     print()
 
+    # The archived copy is the record of what was proposed, so it is rendered without
+    # the approval controls: an archive that could still submit something would be
+    # lying about what it is.
     report_path = archive_report(config, render_plan_html(dedupe_plan))
     print(f"Report archived to {report_path}")
-    if args.no_browser:
-        print("Not opening a browser (--no-browser).")
-    else:
-        webbrowser.open(report_path.as_uri())
-        print("Opened the report in your browser.")
+
+    resolution = review(dedupe_plan, port=args.port, open_browser=not args.no_browser)
+    if resolution is None:
+        return 130
+
     print()
-    print("Nothing has been changed. Reviewing and approving arrives in later work.")
+    print(format_resolution(resolution))
+    print()
+    print("Nothing has been deleted: this run resolves decisions and stops there.")
     return 0
+
+
+def review(dedupe_plan: DedupePlan, *, port: int, open_browser: bool) -> Resolution | None:
+    """Serve the plan for review and block until it is approved, or abandoned.
+
+    Returns the resolution, or None if the reviewer interrupted the run from the
+    terminal. There is no third outcome and no timeout: closing the browser tab is
+    not an answer, so the process simply keeps waiting for one.
+    """
+    html = render_plan_html(dedupe_plan, approve_url=APPROVE_PATH)
+
+    def interpret(raw: Any) -> Resolution:
+        # Runs on the request thread. Pure, and the only thing standing between a
+        # submitted form and a deletion set -- so a payload that does not describe
+        # this plan raises here, is answered as a 400 the reviewer can see, and ends
+        # nothing.
+        return resolve_decisions(dedupe_plan, ApprovalPayload.from_raw(raw))
+
+    with ApprovalServer(html, interpret=interpret, port=port) as server:
+        print()
+        print(f"Review the plan at {server.url}")
+        if open_browser:
+            webbrowser.open(server.url)
+            print("Opened it in your browser.")
+        else:
+            print("Not opening a browser (--no-browser).")
+        print(
+            "Waiting for your decision. Closing the tab does not cancel the run; "
+            "press Ctrl-C here to abandon it."
+        )
+        try:
+            return server.wait_for_decision()
+        except KeyboardInterrupt:
+            print()
+            print("Run abandoned. Nothing in your library was changed.")
+            return None
+
+
+def format_resolution(resolution: Resolution) -> str:
+    """The resolved deletion set, said plainly, with nothing summarised away."""
+    lines = [
+        "Resolved decisions",
+        f"  albums to remove   {len(resolution.to_delete)}",
+        f"  albums kept        {len(resolution.kept)}",
+        f"  groups skipped     {len(resolution.skipped_groups)}",
+    ]
+    if not resolution.to_delete:
+        lines.append("")
+        lines.append("Nothing was selected for removal.")
+        return "\n".join(lines)
+    width = max(len(album.name) for album in resolution.restore_albums)
+    lines.append("")
+    lines.append("Would remove:")
+    lines.extend(
+        f"  {album.id}  {album.name:<{width}}  {album.artists}"
+        for album in resolution.restore_albums
+    )
+    return "\n".join(lines)
 
 
 def archive_report(config: Config, html: str) -> Path:
