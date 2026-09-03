@@ -25,7 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="review saved albums for duplicate editions (currently read-only)",
         description=(
             "Fetch the saved-album library (from the local snapshot when it is still "
-            "fresh) and report what was found. Nothing is modified."
+            "fresh), work out which albums are duplicate editions of each other, and "
+            "print the proposal: every group, its members, the proposed keeper, the "
+            "key that grouped them and the decorations that were ignored to match. "
+            "Nothing is modified."
         ),
     )
     dedupe.add_argument(

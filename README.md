@@ -5,9 +5,10 @@ construction is saved-album deduplication: finding albums saved twice under diff
 editions (a plain release alongside a Deluxe or Remastered one) and proposing a
 cleanup that only ever runs after explicit approval.
 
-**Current state:** the read-only walking skeleton. `dedupe` authenticates, downloads
-the entire saved-album library, caches it locally, and prints what it found. Nothing
-is analysed and nothing is modified yet.
+**Current state:** read-only. `dedupe` authenticates, downloads the entire
+saved-album library, caches it locally, works out which albums are duplicate editions
+of each other, and prints the proposal as plain text. Nothing is modified: reviewing
+and approving in a browser, and the deletion itself, come next.
 
 ## Setup
 
@@ -51,8 +52,19 @@ spotify-manager redact-snapshot [--source PATH] [--output PATH]
 
 ### `dedupe`
 
-Fetches the saved-album library and prints a summary: total albums, pages fetched,
-requests made, and elapsed time.
+Fetches the saved-album library and prints the dedupe proposal: how many albums were
+scanned, how many were excluded and why, then every duplicate group with its members,
+the proposed keeper, the normalized key that grouped them, and the decorations that
+had to be ignored for the members to match. Nothing is deleted.
+
+Grouping is deliberately timid. Two albums are the same record only when their
+normalized titles, their primary artist identifiers and their release types all
+match, and a title is only normalized by removing decorations on a closed list --
+Deluxe, Super Deluxe, Expanded, Complete, Anniversary, Remaster(ed), Special, Bonus
+Track, featured-artist clauses, and a trailing year. Anything else, from `(Live)` to
+`(Vol. 2)` to `(Explicit Version)`, keeps two albums apart. The cost of that bias is
+the occasional duplicate left in place; the cost of the opposite bias is an album
+deleted that cannot be recovered.
 
 The first run opens a browser for the Spotify login. The token is then cached, so
 later runs never prompt again -- it refreshes itself silently.
