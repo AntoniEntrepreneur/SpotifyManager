@@ -1,21 +1,26 @@
 """The `dedupe` subcommand.
 
 The command is still read-only: it loads the library (cache or API), computes the
-plan, and prints it. Nothing is deleted, and nothing can be -- the report, the
-approval server and the deletion path arrive in later work and slot in after
-`plan`.
+plan, prints a summary, and opens a report in the browser. Nothing is deleted, and
+nothing can be -- approval and the deletion path arrive in later work and slot in
+after `plan`.
 
-The printing lives here rather than in the planner because the planner must stay a
-pure function returning data; how that data is shown is a presentation choice.
+The printing and rendering live here rather than in the planner or the renderer
+because both of those must stay pure functions returning data; deciding where the
+bytes go -- stdout, an archive file, a browser -- is this module's job alone.
 """
 
 from __future__ import annotations
 
 import argparse
+import webbrowser
+from datetime import datetime
+from pathlib import Path
 
 from ..config import Config, load_config
 from ..dedupe.models import DedupePlan, DuplicateGroup, snapshot_from_raw
 from ..dedupe.planner import plan as build_plan
+from ..report import render_plan_html
 from .library import load_library
 
 
@@ -39,8 +44,30 @@ def run(args: argparse.Namespace) -> int:
     print()
     print(format_plan(dedupe_plan))
     print()
+
+    report_path = archive_report(config, render_plan_html(dedupe_plan))
+    print(f"Report archived to {report_path}")
+    if args.no_browser:
+        print("Not opening a browser (--no-browser).")
+    else:
+        webbrowser.open(report_path.as_uri())
+        print("Opened the report in your browser.")
+    print()
     print("Nothing has been changed. Reviewing and approving arrives in later work.")
     return 0
+
+
+def archive_report(config: Config, html: str) -> Path:
+    """Write the rendered report to a timestamped file and return its path.
+
+    Every run keeps its own copy: the report is the record of what the tool proposed
+    at a given moment, and a later ranking change should not rewrite history.
+    """
+    config.reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    path = config.reports_dir / f"dedupe-report-{stamp}.html"
+    path.write_text(html, encoding="utf-8")
+    return path
 
 
 def format_plan(dedupe_plan: DedupePlan) -> str:

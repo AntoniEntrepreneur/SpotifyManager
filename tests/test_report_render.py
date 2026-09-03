@@ -1,0 +1,190 @@
+"""The rendered report, asserted only on what a reader (or a browser) can observe.
+
+The report is presentation, so the claims worth pinning are the ones a change could
+plausibly break without anyone noticing: the document depends on nothing external,
+its headline numbers are the plan's own numbers, every group is actually in the
+document, and text that came from an album title cannot escape into markup.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from spotify_manager.dedupe.models import (
+    AlbumJudgement,
+    Artist,
+    DedupePlan,
+    DuplicateGroup,
+    GroupKey,
+    Image,
+    SavedAlbum,
+    snapshot_from_raw,
+)
+from spotify_manager.dedupe.planner import plan
+from spotify_manager.report import render_plan_html
+
+FIXTURE = Path(__file__).parent / "fixtures" / "library_snapshot.redacted.json"
+RENDER_MODULE = Path(__file__).parents[1] / "src" / "spotify_manager" / "report" / "render.py"
+
+#: A title carrying every character that breaks a naive renderer, plus a `$` because
+#: `$` is what breaks a naive *templating* one.
+HOSTILE_TITLE = 'Rock & Roll <script>alert("x")</script> $5 — "Deluxe" & <b>bold</b>'
+
+
+@pytest.fixture(scope="module")
+def real_plan() -> DedupePlan:
+    return plan(snapshot_from_raw(json.loads(FIXTURE.read_text(encoding="utf-8"))))
+
+
+@pytest.fixture(scope="module")
+def real_html(real_plan: DedupePlan) -> str:
+    return render_plan_html(real_plan)
+
+
+def _album(album_id: str, name: str, tracks: int = 10) -> SavedAlbum:
+    return SavedAlbum(
+        id=album_id,
+        name=name,
+        artists=(Artist(id="artist-1", name='Sam & "The" <Band>'),),
+        album_type="album",
+        release_date="2019-03-04",
+        release_date_precision="day",
+        total_tracks=tracks,
+        images=(Image(url="https://i.scdn.co/image/abc", height=300, width=300),),
+    )
+
+
+def _plan_with(*names: str, suppressed_groups: int = 0) -> DedupePlan:
+    albums = [_album(f"id{index}", name) for index, name in enumerate(names)]
+    members = tuple(
+        AlbumJudgement(
+            album=album,
+            edition_rank=80 if index == 0 else 0,
+            edition_category="deluxe" if index == 0 else "plain",
+            ignored_decorations=("Deluxe & <Expanded>",) if index == 0 else (),
+            is_keeper=index == 0,
+        )
+        for index, album in enumerate(albums)
+    )
+    group = DuplicateGroup(
+        key=GroupKey(normalized_title="rock & roll", primary_artist_id="artist-1", album_type="album"),
+        members=members,
+        keeper_id=albums[0].id,
+        ignored_decorations=("Deluxe & <Expanded>",),
+    )
+    return DedupePlan(
+        groups=(group,),
+        total_albums_scanned=len(albums) + 7,
+        excluded_reasons={"compilation": 24, "unreadable & odd": 2},
+        suppressed_group_count=suppressed_groups,
+    )
+
+
+def test_the_document_depends_on_nothing_but_spotify_cover_art(real_html: str):
+    assert "<script src" not in real_html
+    assert "<link " not in real_html
+    assert "@import" not in real_html
+    hosts = set(re.findall(r"https?://([^/\"'\s]+)", real_html))
+    assert hosts == {"i.scdn.co"}, hosts
+    assert "i.scdn.co" in real_html.split("<footer>")[1]  # the trade-off is stated
+
+
+def test_the_header_states_the_plans_own_numbers(real_plan: DedupePlan, real_html: str):
+    header = real_html.split("</header>")[0]
+    for value, label in (
+        (real_plan.total_albums_scanned, "albums scanned"),
+        (len(real_plan.groups), "duplicate groups"),
+        (real_plan.proposed_removal_count, "proposed for removal"),
+        (real_plan.suppressed_group_count, "suppressed groups"),
+    ):
+        assert f'<span class="n">{value}</span><span class="l">{label}</span>' in header
+
+
+def test_the_suppressed_stat_reads_the_plan_rather_than_a_constant():
+    html = render_plan_html(_plan_with("A (Deluxe)", "A", suppressed_groups=3))
+    assert '<span class="n">3</span><span class="l">suppressed groups</span>' in html
+    assert "<strong>3</strong> groups were suppressed" in html
+
+
+def test_every_group_and_every_album_is_in_the_document(real_plan: DedupePlan, real_html: str):
+    assert real_html.count('<section class="group"') == len(real_plan.groups)
+    for index, group in enumerate(real_plan.groups):
+        assert f'id="group-{index}"' in real_html
+        assert f'data-size="{len(group.members)}"' in real_html
+        for member in group.members:
+            assert f'data-album-id="{member.album.id}"' in real_html
+    keepers = real_html.count('data-keeper="true"')
+    assert keepers == len(real_plan.groups)
+    assert real_html.count('data-keeper="false"') == real_plan.proposed_removal_count
+
+
+def test_the_keeper_is_marked_and_the_rest_are_not(real_plan: DedupePlan, real_html: str):
+    assert real_html.count('class="badge keep"') == len(real_plan.groups)
+    assert real_html.count('class="badge remove"') == real_plan.proposed_removal_count
+    assert real_html.count('class="album keeper"') == len(real_plan.groups)
+
+
+def test_each_album_shows_cover_art_title_artist_year_tracks_and_rank(real_plan: DedupePlan, real_html: str):
+    group = real_plan.groups[0]
+    card = real_html.split(f'data-album-id="{group.keeper.album.id}"')[1].split("</article>")[0]
+    assert 'class="cover" src="https://i.scdn.co/image/' in card
+    assert group.keeper.album.name in card
+    assert group.keeper.album.artist_names in card
+    assert str(group.keeper.album.release_sort_key[0]) in card
+    assert f"{group.keeper.album.total_tracks} tracks" in card
+    assert f"rank {group.keeper.edition_rank}" in card
+
+
+def test_each_group_shows_its_key_and_the_decorations_it_ignored(real_plan: DedupePlan, real_html: str):
+    for group in real_plan.groups:
+        assert f'class="key mono">{group.key.normalized_title}<' in real_html
+    donda = [g for g in real_plan.groups if g.key.normalized_title == "donda"][0]
+    card = real_html.split(f'id="group-{real_plan.groups.index(donda)}"')[1].split("</section>")[0]
+    assert '<span class="chip">Deluxe</span>' in card
+
+
+def test_a_title_full_of_markup_is_escaped_rather_than_rendered():
+    html = render_plan_html(_plan_with(HOSTILE_TITLE, "Rock & Roll"))
+
+    assert HOSTILE_TITLE not in html
+    assert "<script>alert" not in html
+    assert "<b>bold</b>" not in html
+    assert "Rock &amp; Roll &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; $5" in html
+    assert "Sam &amp; &quot;The&quot; &lt;Band&gt;" in html
+    assert "Deluxe &amp; &lt;Expanded&gt;" in html
+    # The searchable attribute is derived from the same text and must be safe too.
+    assert 'data-search="rock &amp; roll' in html
+
+
+def test_the_footer_reports_every_exclusion_reason_it_was_given():
+    html = render_plan_html(_plan_with("A (Deluxe)", "A"))
+    footer = html.split("<footer>")[1]
+    assert "<strong>26</strong> albums were excluded" in footer
+    assert "24 compilation" in footer
+    assert "2 unreadable &amp; odd" in footer
+
+
+def test_an_empty_plan_still_renders_a_document():
+    html = render_plan_html(DedupePlan(total_albums_scanned=12))
+    assert "No duplicate editions found." in html
+    assert "No albums were excluded from analysis." in html
+    assert html.strip().endswith("</html>")
+
+
+def test_rendering_cannot_reach_the_filesystem_the_network_or_the_clock():
+    """Re-rendering must stay free; the cheapest guarantee is that it cannot do I/O."""
+    tree = ast.parse(RENDER_MODULE.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    forbidden = ("pathlib", "os", "time", "datetime", "requests", "urllib", "webbrowser")
+    for name in imported:
+        assert name.split(".")[0] not in forbidden, f"render.py imports {name!r}"
