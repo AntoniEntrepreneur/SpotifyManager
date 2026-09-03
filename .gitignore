@@ -17,3 +17,6 @@ restore/
 
 # macOS
 .DS_Store
+
+# Redacted fixture is committed; the raw snapshot never is
+library_snapshot.json
