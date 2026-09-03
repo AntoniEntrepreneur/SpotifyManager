@@ -30,7 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
             "then serve a report showing every group, its members, the proposed "
             "keeper, the key that grouped them and the decorations that were ignored "
             "to match. Tick exactly which albums to keep, skip any group you "
-            "disagree with, and approve. The run waits for that decision with no "
+            "disagree with, and approve. Skipped groups are remembered as pairs of "
+            "albums judged not to be duplicates, and those comparisons are never "
+            "proposed again until --clear-decisions forgets them. The run waits for "
+            "that decision with no "
             "timeout, and can be abandoned with Ctrl-C. Nothing is deleted: this "
             "version resolves the decisions into the exact set of albums that would "
             "be removed, prints it, and stops."
@@ -54,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "local port to serve the approval page on "
             f"(default: {report.DEFAULT_PORT}; the page is bound to 127.0.0.1 only)"
+        ),
+    )
+    dedupe.add_argument(
+        "--clear-decisions",
+        action="store_true",
+        help=(
+            "forget every 'not duplicates' pair recorded by earlier runs, so groups "
+            "suppressed by those decisions are proposed again"
         ),
     )
     dedupe.add_argument(
