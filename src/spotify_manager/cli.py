@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from . import report
-from .commands import dedupe_cmd, redact_cmd, restore_cmd
+from .commands import dedupe_cmd, like_cmd, redact_cmd, restore_cmd
 from .errors import SpotifyManagerError
 
 
@@ -86,6 +86,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     redact_cmd.add_arguments(redact)
     redact.set_defaults(func=redact_cmd.run)
+
+    like = subparsers.add_parser(
+        "like-album-tracks",
+        help="like every song on every saved album that is not liked yet",
+        description=(
+            "Work out every track on every saved album that is not already in Liked "
+            "Songs, and like it. Track lists come from the saved-album snapshot the "
+            "tool already holds, so discovery costs no requests; only an album whose "
+            "listed track page was truncated is fetched individually. The same "
+            "recording saved on two editions of one record is liked once, from the "
+            "richer edition, never from a compilation when a real album has it. The "
+            "plan is shown as counts and nothing is written until you confirm. "
+            "Before the first like is issued, a run record naming exactly the tracks "
+            "the run set out to like is written to disk, so the run can be undone; "
+            "if that record cannot be written, nothing is liked. Likes go out in "
+            "batches of fifty, oldest saved album first, and the command reports "
+            "exactly how many tracks were liked, failed, or never attempted. "
+            "Re-running finishes an interrupted run: it likes only what is still "
+            "missing."
+        ),
+    )
+    like_cmd.add_arguments(like)
+    like.set_defaults(func=like_cmd.run)
 
     restore = subparsers.add_parser(
         "restore",

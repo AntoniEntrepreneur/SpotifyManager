@@ -17,6 +17,7 @@ import pytest
 from spotify_manager.infra.cache import LibraryCache, is_fresh
 from spotify_manager.infra.http import (
     RETRY_AFTER_FALLBACK_SECONDS,
+    _client_error_message,
     backoff_delay,
     parse_retry_after,
 )
@@ -75,6 +76,35 @@ def test_cache_misses_when_expired(tmp_path):
     assert LibraryCache(path, ttl_seconds=3600).load(now=NOW) is None
 
 
+def test_a_cache_can_hold_a_different_listing_under_a_different_key(tmp_path):
+    """One class, two snapshots: saved albums and liked tracks."""
+    cache = LibraryCache(tmp_path / "liked.json", 3600, key="tracks")
+    saved = cache.save([{"track": {"id": "t1"}}])
+
+    assert "tracks" in saved and "albums" not in saved
+    assert cache.load()["tracks"] == [{"track": {"id": "t1"}}]
+
+
+def test_a_snapshot_written_under_one_key_is_not_read_under_another(tmp_path):
+    """A misread cache would silently answer the wrong question."""
+    path = tmp_path / "snapshot.json"
+    LibraryCache(path, 3600, key="albums").save([{"album": {"id": "a1"}}])
+
+    assert LibraryCache(path, 3600, key="tracks").load() is None
+
+
+def test_discarding_a_snapshot_removes_it(tmp_path):
+    cache = LibraryCache(tmp_path / "liked.json", 3600, key="tracks")
+    cache.save([])
+
+    assert cache.discard() is True
+    assert cache.load() is None
+
+
+def test_discarding_a_snapshot_that_is_not_there_is_harmless(tmp_path):
+    assert LibraryCache(tmp_path / "missing.json", 3600).discard() is False
+
+
 def test_corrupt_cache_is_a_miss_not_a_failure(tmp_path):
     path = tmp_path / "snap.json"
     path.write_text("{ not json", encoding="utf-8")
@@ -105,6 +135,66 @@ def test_retry_after_header_is_honoured_exactly():
 @pytest.mark.parametrize("value", [None, "", "soon", "-3"])
 def test_missing_or_unusable_retry_after_falls_back(value):
     assert parse_retry_after(value) == RETRY_AFTER_FALLBACK_SECONDS
+
+
+# -- what a client error tells the user --------------------------------------
+
+
+class FakeResponse:
+    """Just enough of `requests.Response` for the message builder to read."""
+
+    def __init__(self, status_code: int, payload=None, text: str = ""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def _forbidden(message: str) -> str:
+    response = FakeResponse(403, {"error": {"status": 403, "message": message}})
+    return _client_error_message("DELETE", "https://api.spotify.com/v1/me/albums", response)
+
+
+def test_a_missing_scope_403_says_to_log_in_again():
+    text = _forbidden("Insufficient client scope")
+
+    assert "Insufficient client scope" in text, "Spotify's own words, verbatim"
+    assert "token_cache.json" in text
+    assert "User Management" not in text
+
+
+def test_a_bare_forbidden_403_blames_the_allowlist_not_the_token():
+    """The one that cost real debugging time: a valid token, an unlisted account."""
+    text = _forbidden("Forbidden")
+
+    assert "Forbidden" in text, "Spotify's own words, verbatim"
+    assert "User Management" in text
+    assert "Development Mode" in text
+    assert "quota-modes" in text
+    # Deleting the token cache does not help here, so it must not be suggested.
+    assert "token_cache.json" not in text
+
+
+def test_the_two_403_bodies_get_different_guidance():
+    assert _forbidden("Insufficient client scope") != _forbidden("Forbidden")
+
+
+def test_a_401_still_says_to_log_in_again():
+    response = FakeResponse(401, {"error": {"status": 401, "message": "expired"}})
+    text = _client_error_message("GET", "https://api.spotify.com/v1/me/albums", response)
+
+    assert "401" in text and "token_cache.json" in text
+
+
+def test_any_other_client_error_quotes_the_method_url_and_message():
+    response = FakeResponse(400, {"error": {"status": 400, "message": "bad id"}})
+    text = _client_error_message("PUT", "https://api.spotify.com/v1/me/albums", response)
+
+    assert "400" in text and "PUT" in text and "bad id" in text
 
 
 # -- fixture redaction -------------------------------------------------------
@@ -164,6 +254,91 @@ def test_redaction_drops_account_and_plumbing_fields():
     blob = json.dumps(redacted)
     for leaked in ("available_markets", "href", "uri", "external_urls", "external_ids", "extra"):
         assert leaked not in blob
+
+
+def test_redaction_keeps_the_track_fields_the_like_planner_needs():
+    raw = {
+        "fetched_at": "2026-01-01T00:00:00Z",
+        "albums": [
+            {
+                "added_at": "2020-01-01T12:34:56Z",
+                "album": {
+                    "id": "a1",
+                    "name": "Record",
+                    "album_type": "album",
+                    "release_date": "2020-01-01",
+                    "release_date_precision": "day",
+                    "total_tracks": 2,
+                    "artists": [{"id": "ar1", "name": "The Band", "href": "x"}],
+                    "images": [],
+                    "tracks": {
+                        "total": 2,
+                        "href": "https://api.spotify.com/secret",
+                        "items": [
+                            {
+                                "id": "t1",
+                                "name": "A Song",
+                                "duration_ms": 200000,
+                                "disc_number": 1,
+                                "track_number": 1,
+                                "is_local": False,
+                                "artists": [{"name": "The Band", "id": "ar1", "uri": "x"}],
+                                "available_markets": ["GB"],
+                                "uri": "spotify:track:t1",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+    track = redact_snapshot(raw)["albums"][0]["album"]["tracks"]["items"][0]
+
+    assert track["id"] == "t1"
+    assert track["name"] == "A Song"
+    assert track["duration_ms"] == 200000
+    assert track["disc_number"] == 1 and track["track_number"] == 1
+    assert track["is_local"] is False
+    assert track["artists"] == [{"name": "The Band"}]
+
+
+def test_redaction_keeps_the_track_total_so_truncation_is_still_visible():
+    raw = {
+        "albums": [
+            {"added_at": "2020-01-01T00:00:00Z", "album": {"id": "a1", "tracks": {"total": 60, "items": []}}}
+        ]
+    }
+    assert redact_snapshot(raw)["albums"][0]["album"]["tracks"]["total"] == 60
+
+
+def test_redaction_drops_api_plumbing_from_the_track_listing():
+    raw = {
+        "albums": [
+            {
+                "added_at": "2020-01-01T00:00:00Z",
+                "album": {
+                    "id": "a1",
+                    "tracks": {
+                        "total": 1,
+                        "href": "https://api.spotify.com/secret",
+                        "next": "https://api.spotify.com/secret?offset=50",
+                        "items": [{"id": "t1", "uri": "spotify:track:t1", "available_markets": ["GB"]}],
+                    },
+                },
+            }
+        ]
+    }
+    tracks = redact_snapshot(raw)["albums"][0]["album"]["tracks"]
+
+    assert set(tracks) == {"total", "items"}
+    assert set(tracks["items"][0]) == {
+        "id", "name", "duration_ms", "disc_number", "track_number", "is_local", "artists"
+    }
+
+
+def test_redaction_survives_an_album_with_no_track_listing_at_all():
+    raw = {"albums": [{"added_at": "2020-01-01T00:00:00Z", "album": {"id": "a1"}}]}
+    assert redact_snapshot(raw)["albums"][0]["album"]["tracks"] == {"total": 0, "items": []}
 
 
 def test_redaction_is_deterministic():

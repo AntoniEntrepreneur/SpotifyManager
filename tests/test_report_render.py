@@ -335,7 +335,7 @@ def _resolution(count: int, *, kept: int = 0, skipped_size: int = 0) -> Resoluti
 def test_a_clean_result_states_removed_count_and_no_failures():
     resolution = _resolution(3, kept=2)
     result = ExecutionResult(
-        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        batches=(BatchOutcome(number=1, ids=resolution.to_delete, status="succeeded", attempts=1),),
         requested_ids=resolution.to_delete,
         restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
         created_at="2026-09-03T14:30:00+00:00",
@@ -368,15 +368,15 @@ def test_a_partial_failure_states_every_count_exactly_and_never_summarises_it_aw
     resolution = _resolution(6)
     result = ExecutionResult(
         batches=(
-            BatchOutcome(number=1, album_ids=resolution.to_delete[:2], status="succeeded", attempts=1),
+            BatchOutcome(number=1, ids=resolution.to_delete[:2], status="succeeded", attempts=1),
             BatchOutcome(
                 number=2,
-                album_ids=resolution.to_delete[2:4],
+                ids=resolution.to_delete[2:4],
                 status="failed",
                 attempts=4,
                 error="RuntimeError: Spotify said no",
             ),
-            BatchOutcome(number=3, album_ids=resolution.to_delete[4:], status="never_attempted"),
+            BatchOutcome(number=3, ids=resolution.to_delete[4:], status="never_attempted"),
         ),
         requested_ids=resolution.to_delete,
         restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
@@ -401,10 +401,103 @@ def test_a_partial_failure_states_every_count_exactly_and_never_summarises_it_aw
     assert html.strip().endswith("</html>")
 
 
+def test_a_batch_spotify_refused_is_reported_as_certainly_still_saved():
+    """A 4xx removed nothing, so the page must say so rather than hedge. Hedging here
+    sends the reader to check a library that is exactly as they left it."""
+    resolution = _resolution(4)
+    result = ExecutionResult(
+        batches=(
+            BatchOutcome(number=1, ids=resolution.to_delete[:2], status="succeeded", attempts=1),
+            BatchOutcome(
+                number=2,
+                ids=resolution.to_delete[2:],
+                status="failed",
+                attempts=4,
+                error="ApiError: Spotify refused the request (403).",
+                error_status=403,
+            ),
+        ),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "refused by Spotify &mdash; still saved" in html
+    assert "state unknown" not in html
+    assert "may or may not still be saved" not in html
+    assert "certainly still saved" in html
+    # The albums are still named, and the error that explains the refusal is shown.
+    for album_id in resolution.to_delete[2:]:
+        assert album_id in html
+    assert "403" in html
+
+
+def test_a_failure_with_no_status_keeps_the_unknown_state_wording():
+    resolution = _resolution(4)
+    result = ExecutionResult(
+        batches=(
+            BatchOutcome(number=1, ids=resolution.to_delete[:2], status="succeeded", attempts=1),
+            BatchOutcome(
+                number=2,
+                ids=resolution.to_delete[2:],
+                status="failed",
+                attempts=4,
+                error="TimeoutError: read timed out",
+            ),
+        ),
+        requested_ids=resolution.to_delete,
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "state unknown" in html
+    assert "may or may not still be in your library" in html
+    assert "refused by Spotify" not in html
+
+
+def test_refused_and_unknown_failures_are_reported_in_separate_panels():
+    resolution = _resolution(6)
+    result = ExecutionResult(
+        batches=(
+            BatchOutcome(
+                number=1,
+                ids=resolution.to_delete[:3],
+                status="failed",
+                attempts=4,
+                error="ApiError: Forbidden",
+                error_status=403,
+            ),
+            BatchOutcome(
+                number=2,
+                ids=resolution.to_delete[3:],
+                status="failed",
+                attempts=4,
+                error="TimeoutError: read timed out",
+            ),
+        ),
+        requested_ids=resolution.to_delete,
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert result.rejected_count == 3 and result.unknown_count == 3
+    assert "refused by Spotify &mdash; still saved" in html
+    assert "state unknown" in html
+    # Each album is named under the panel that tells the truth about it.
+    refused_panel = html.split("refused by Spotify &mdash; still saved")[1].split(
+        "state unknown"
+    )[0]
+    for album_id in resolution.to_delete[:3]:
+        assert album_id in refused_panel
+    for album_id in resolution.to_delete[3:]:
+        assert album_id not in refused_panel
+
+
 def test_the_results_page_names_the_restore_file_and_the_undo_command():
     resolution = _resolution(2)
     result = ExecutionResult(
-        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        batches=(BatchOutcome(number=1, ids=resolution.to_delete, status="succeeded", attempts=1),),
         requested_ids=resolution.to_delete,
         restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
         created_at="2026-09-03T14:30:00+00:00",
@@ -418,7 +511,7 @@ def test_the_results_page_names_the_restore_file_and_the_undo_command():
 def test_the_results_page_is_self_contained_except_cover_art():
     resolution = _resolution(2)
     result = ExecutionResult(
-        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        batches=(BatchOutcome(number=1, ids=resolution.to_delete, status="succeeded", attempts=1),),
         requested_ids=resolution.to_delete,
         restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
         created_at="2026-09-03T14:30:00+00:00",
@@ -437,7 +530,7 @@ def test_the_results_page_carries_no_approval_controls():
     to submit anything -- there is no plan left to submit it against."""
     resolution = _resolution(2)
     result = ExecutionResult(
-        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        batches=(BatchOutcome(number=1, ids=resolution.to_delete, status="succeeded", attempts=1),),
         requested_ids=resolution.to_delete,
         restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
         created_at="2026-09-03T14:30:00+00:00",
@@ -466,7 +559,7 @@ def test_the_results_page_escapes_hostile_album_names():
         ),
     )
     result = ExecutionResult(
-        batches=(BatchOutcome(number=1, album_ids=("hostile1",), status="failed", attempts=4, error="boom"),),
+        batches=(BatchOutcome(number=1, ids=("hostile1",), status="failed", attempts=4, error="boom"),),
         requested_ids=("hostile1",),
         restore_path=Path("/tmp/restores/restore-x.json"),
         created_at="2026-09-03T14:30:00+00:00",

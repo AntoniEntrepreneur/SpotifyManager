@@ -17,6 +17,13 @@ being a real-library fixture:
 * ``album.release_date`` and ``album.release_date_precision`` -- tiebreaker
 * ``album.total_tracks`` -- tiebreaker
 * ``album.images`` (url/height/width) -- the report renders cover art from these
+* ``album.tracks`` -- the id, name, artist names, duration, disc and track number and
+  local flag of each listed track, plus the paging ``total``. The like planner
+  decides what to like, what is a duplicate of what, and in what order from exactly
+  these fields, so a fixture without them cannot exercise it at all. Track ids and
+  titles are public Spotify catalogue data, like album titles; the ``total`` is kept
+  because whether a track list was truncated is a fact about the album, not about
+  the account.
 
 What is STRIPPED
 ----------------
@@ -51,6 +58,14 @@ ALBUM_KEYS = (
     "total_tracks",
 )
 ARTIST_KEYS = ("id", "name")
+TRACK_KEYS = (
+    "id",
+    "name",
+    "duration_ms",
+    "disc_number",
+    "track_number",
+    "is_local",
+)
 IMAGE_KEYS = ("url", "height", "width")
 
 DEFAULT_OUTPUT = Path("tests/fixtures/library_snapshot.redacted.json")
@@ -61,6 +76,23 @@ def redact_added_at(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value.split("T", 1)[0]
+
+
+def redact_tracks(paging: Any) -> dict[str, Any]:
+    """Keep the listed tracks and how many there are in total, and nothing else."""
+    paging = paging if isinstance(paging, dict) else {}
+    items = [t for t in paging.get("items") or [] if isinstance(t, dict)]
+    redacted = []
+    for track in items:
+        out = {key: track.get(key) for key in TRACK_KEYS}
+        out["artists"] = [
+            {"name": artist.get("name")}
+            for artist in track.get("artists") or []
+            if isinstance(artist, dict)
+        ]
+        redacted.append(out)
+    total = paging.get("total")
+    return {"total": total if isinstance(total, int) else len(redacted), "items": redacted}
 
 
 def redact_album(album: dict[str, Any]) -> dict[str, Any]:
@@ -75,6 +107,7 @@ def redact_album(album: dict[str, Any]) -> dict[str, Any]:
         for image in album.get("images") or []
         if isinstance(image, dict)
     ]
+    out["tracks"] = redact_tracks(album.get("tracks"))
     return out
 
 

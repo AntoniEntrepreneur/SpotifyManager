@@ -97,7 +97,7 @@ def test_a_clean_restore_run_reports_the_count_and_exits_zero(tmp_path, monkeypa
         seen["album_ids"] = album_ids
         seen["client"] = client
         return ExecutionResult(
-            batches=(BatchOutcome(number=1, album_ids=album_ids, status=SUCCEEDED),),
+            batches=(BatchOutcome(number=1, ids=album_ids, status=SUCCEEDED),),
             requested_ids=album_ids,
         )
 
@@ -121,8 +121,8 @@ def test_format_result_names_failures_and_never_attempted():
 
     result = ExecutionResult(
         batches=(
-            BatchOutcome(number=1, album_ids=("f1",), status=FAILED, error="boom"),
-            BatchOutcome(number=2, album_ids=("n1",), status=NEVER_ATTEMPTED),
+            BatchOutcome(number=1, ids=("f1",), status=FAILED, error="boom"),
+            BatchOutcome(number=2, ids=("n1",), status=NEVER_ATTEMPTED),
         ),
         requested_ids=("f1", "n1"),
     )
