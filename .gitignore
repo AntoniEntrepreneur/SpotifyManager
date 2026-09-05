@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+.cache
+.spotify-token-cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Local run artifacts
+.spotifymanager/
+reports/
+restore/
+
+# macOS
+.DS_Store
+
+# Redacted fixture is committed; the raw snapshot never is
+library_snapshot.json
