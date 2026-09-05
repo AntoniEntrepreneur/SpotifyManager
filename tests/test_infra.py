@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from spotify_manager.infra.cache import LibraryCache, is_fresh
+from spotify_manager.infra.client import SpotifyClient
 from spotify_manager.infra.http import (
     RETRY_AFTER_FALLBACK_SECONDS,
     _client_error_message,
@@ -351,3 +352,39 @@ def test_redaction_survives_a_malformed_item():
     album = redacted["albums"][0]["album"]
     assert redacted["albums"][0]["added_at"] is None
     assert album["artists"] == [] and album["images"] == []
+
+
+# -- the write verbs, on a session that only records what it was asked --------
+
+# The API itself is never mocked; what is checked here is only which verb and path
+# each write picks, because getting `remove_tracks` wrong would delete saved albums.
+
+
+class RecordingSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, list[str]]] = []
+
+    def put_ids(self, path: str, ids: list[str]) -> None:
+        self.calls.append(("PUT", path, list(ids)))
+
+    def delete_ids(self, path: str, ids: list[str]) -> None:
+        self.calls.append(("DELETE", path, list(ids)))
+
+
+def test_removing_tracks_deletes_against_the_tracks_endpoint():
+    session = RecordingSession()
+    SpotifyClient(session).remove_tracks(["t1", "t2"])
+    assert session.calls == [("DELETE", "/me/tracks", ["t1", "t2"])]
+
+
+def test_removing_tracks_never_touches_the_albums_endpoint():
+    """The one mistake in this method that would be catastrophic and silent."""
+    session = RecordingSession()
+    SpotifyClient(session).remove_tracks(["t1"])
+    assert all(path != "/me/albums" for _verb, path, _ids in session.calls)
+
+
+def test_removing_more_tracks_than_one_request_allows_is_split():
+    session = RecordingSession()
+    SpotifyClient(session).remove_tracks([f"t{i}" for i in range(120)])
+    assert [len(ids) for _verb, _path, ids in session.calls] == [50, 50, 20]

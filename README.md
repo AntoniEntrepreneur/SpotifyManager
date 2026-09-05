@@ -8,8 +8,9 @@ cleanup that only ever runs after explicit approval.
 **Current state:** `dedupe` reviews and, once approved in the browser, carries out the
 cleanup, writing a restore file before it removes anything; `restore` puts back
 everything a restore file lists. `like-album-tracks` likes every song on every saved
-album that is not liked yet, writing a run record before it adds anything. Nothing is
-ever written to Spotify without an explicit approval and a way back.
+album that is not liked yet, writing a run record before it adds anything;
+`unlike-tracks` spends that record to undo the run. Nothing is ever written to Spotify
+without an explicit approval and a way back.
 
 ## Setup
 
@@ -50,6 +51,7 @@ pip install -e ".[dev]"
 spotify-manager dedupe [--refresh] [--no-browser] [--port PORT] [--clear-decisions] [--verbose]
 spotify-manager like-album-tracks [--refresh] [--yes] [--dry-run] [--rate PER_SECOND] [--verbose]
 spotify-manager restore RESTORE_FILE [--verbose]
+spotify-manager unlike-tracks RUN_RECORD [--rate PER_SECOND] [--verbose]
 spotify-manager redact-snapshot [--source PATH] [--output PATH]
 ```
 
@@ -129,6 +131,28 @@ parsed and validated before a single request goes out, so a missing or malformed
 restore file produces a clear message and restores nothing. Re-saving an album that is
 already saved is harmless.
 
+### `unlike-tracks`
+
+Removes the like from every track listed in a run record written by
+`like-album-tracks`. That record is the only thing that tells the tracks one run liked
+apart from likes made by hand years ago, so this command takes a path and never a
+guess. The file is fully parsed and validated before a single request goes out, so a
+missing or malformed run record produces a clear message and unlikes nothing.
+
+```
+spotify-manager unlike-tracks .spotifymanager/likes/liked-2026-09-05T14-30-00.json
+```
+
+The record names what the run *set out* to like, which may be more than it managed to
+like; that is harmless, because removing a like that is not there is a no-op on
+Spotify's side. For the same reason a run that did not finish can simply be re-run
+with the same record. The file is read, not consumed: re-running `like-album-tracks`
+is how *this* run is undone in turn.
+
+What it cannot undo is chronology. Liked Songs is ordered by when each track was
+liked, and un-liking then re-liking a track stamps it with the moment of the re-like.
+The original dates are gone either way.
+
 ### `redact-snapshot`
 
 Writes a redacted copy of the cached snapshot to
@@ -157,13 +181,14 @@ gitignored:
   login.
 * `library_snapshot.json` -- the cached saved-album listing.
 * `liked_tracks_snapshot.json` -- the cached Liked Songs listing. `like-album-tracks`
-  deletes it when a run ends, so the next run refetches and does exactly the work that
-  is still outstanding.
+  and `unlike-tracks` delete it when a run ends, so the next run refetches and does
+  exactly the work that is still outstanding.
 * `restores/` -- one file per `dedupe` run that deleted something, listing the albums
   it set out to remove. `spotify-manager restore <file>` undoes that run.
 * `likes/` -- one file per `like-album-tracks` run, listing the tracks it set out to
-  like. Deliberately not the same directory as `restores/`: one holds album ids and one
-  holds track ids, and they are undone by different commands.
+  like. `spotify-manager unlike-tracks <file>` undoes that run. Deliberately not the
+  same directory as `restores/`: one holds album ids and one holds track ids, and they
+  are undone by different commands.
 * `reports/` -- the archived HTML report of each `dedupe` run.
 
 ## Rate limiting
