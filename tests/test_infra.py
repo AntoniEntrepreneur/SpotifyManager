@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from spotify_manager.infra.cache import LibraryCache, is_fresh
-from spotify_manager.infra.client import SpotifyClient
+from spotify_manager.infra.client import ID_BATCH_LIMIT, SpotifyClient
 from spotify_manager.infra.http import (
     RETRY_AFTER_FALLBACK_SECONDS,
     RateLimitedSession,
@@ -479,37 +479,35 @@ def test_redaction_survives_a_malformed_item():
     assert album["artists"] == [] and album["images"] == []
 
 
-# -- the write verbs, on a session that only records what it was asked --------
-
-# The API itself is never mocked; what is checked here is only which verb and path
-# each write picks, because getting `remove_tracks` wrong would delete saved albums.
+# -- removing likes, the fourth library write --------------------------------
 
 
-class RecordingSession:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, list[str]]] = []
+def test_removing_tracks_deletes_track_uris_from_the_library_endpoint():
+    (method, url, params, body), = _recorded(lambda c: c.remove_tracks, ["t1", "t2"])
 
-    def put_ids(self, path: str, ids: list[str]) -> None:
-        self.calls.append(("PUT", path, list(ids)))
-
-    def delete_ids(self, path: str, ids: list[str]) -> None:
-        self.calls.append(("DELETE", path, list(ids)))
+    assert (method, url) == ("DELETE", "https://api.spotify.com/v1/me/library")
+    assert params == {"uris": "spotify:track:t1,spotify:track:t2"}
+    assert body is None
 
 
-def test_removing_tracks_deletes_against_the_tracks_endpoint():
-    session = RecordingSession()
-    SpotifyClient(session).remove_tracks(["t1", "t2"])
-    assert session.calls == [("DELETE", "/me/tracks", ["t1", "t2"])]
-
-
-def test_removing_tracks_never_touches_the_albums_endpoint():
-    """The one mistake in this method that would be catastrophic and silent."""
-    session = RecordingSession()
-    SpotifyClient(session).remove_tracks(["t1"])
-    assert all(path != "/me/albums" for _verb, path, _ids in session.calls)
+def test_removing_tracks_never_names_an_album():
+    """The one mistake in this method that would be catastrophic and silent: the
+    endpoint is shared with album removal now, so the URI prefix is the only thing
+    standing between un-liking a song and deleting a saved album."""
+    (_m, _u, params, _j), = _recorded(lambda c: c.remove_tracks, ["t1"])
+    assert "spotify:album:" not in params["uris"]
 
 
 def test_removing_more_tracks_than_one_request_allows_is_split():
-    session = RecordingSession()
-    SpotifyClient(session).remove_tracks([f"t{i}" for i in range(120)])
-    assert [len(ids) for _verb, _path, ids in session.calls] == [50, 50, 20]
+    calls = _recorded(lambda c: c.remove_tracks, [f"t{i}" for i in range(81)])
+
+    sizes = [len(params["uris"].split(",")) for _m, _u, params, _j in calls]
+    assert sizes == [40, 40, 1]
+
+
+def test_a_chunked_unlike_loses_nothing_and_keeps_its_order():
+    ids = [f"t{i:03d}" for i in range(95)]
+    calls = _recorded(lambda c: c.remove_tracks, ids)
+
+    sent = [u for _m, _url, p, _j in calls for u in p["uris"].split(",")]
+    assert sent == [f"spotify:track:{i}" for i in ids]

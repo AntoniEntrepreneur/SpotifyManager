@@ -202,13 +202,13 @@ def test_an_empty_record_is_valid_and_means_nothing_to_undo():
 
 def test_unliking_removes_every_track_in_the_largest_batches_the_api_permits():
     client = FakeClient()
-    result = unlike(_ids(120), client, sleep=lambda _s: None)
+    result = unlike(_ids(100), client, sleep=lambda _s: None)
 
-    assert [len(call) for call in client.calls] == [50, 50, 20]
-    assert [i for call in client.calls for i in call] == list(_ids(120))
+    assert [len(call) for call in client.calls] == [40, 40, 20]
+    assert [i for call in client.calls for i in call] == list(_ids(100))
     assert [b.status for b in result.batches] == [SUCCEEDED] * 3
-    assert result.unliked_ids == _ids(120)
-    assert result.unliked_count == 120
+    assert result.unliked_ids == _ids(100)
+    assert result.unliked_count == 100
     assert result.is_clean
 
 
@@ -243,19 +243,19 @@ def test_an_unlike_batch_that_fails_every_retry_is_failed_and_the_rest_still_pro
     result = unlike(_ids(120), client, sleep=lambda _s: None)
 
     assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
-    assert result.failed_ids == _ids(120)[:50]
-    assert result.unliked_ids == _ids(120)[50:]
+    assert result.failed_ids == _ids(120)[:40]
+    assert result.unliked_ids == _ids(120)[40:]
     assert not result.is_clean
 
 
 def test_an_unlike_run_is_interrupted_like_a_like_run():
     client = FakeClient(interrupt_on=2)
-    result = unlike(_ids(150), client, sleep=lambda _s: None)
+    result = unlike(_ids(120), client, sleep=lambda _s: None)
 
     assert [b.status for b in result.batches] == [SUCCEEDED, FAILED, NEVER_ATTEMPTED]
-    assert result.unliked_count == 50
-    assert result.failed_count == 50
-    assert result.never_attempted_count == 50
+    assert result.unliked_count == 40
+    assert result.failed_count == 40
+    assert result.never_attempted_count == 40
     assert result.interrupted.startswith("KeyboardInterrupt")
     assert len(client.calls) == 2
 
