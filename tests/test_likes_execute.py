@@ -212,10 +212,17 @@ def test_unliking_removes_every_track_in_the_largest_batches_the_api_permits():
     assert result.is_clean
 
 
-def test_unliking_writes_no_record_of_its_own(tmp_path):
-    """The file being undone is already the record; a second one would be noise."""
-    unlike(_ids(3), FakeClient(), sleep=lambda _s: None)
-    assert list(tmp_path.glob("*.json")) == []
+def test_unliking_writes_no_record_of_its_own():
+    """The file being undone is already the record; a second one would be noise.
+
+    Asserted on the signature, because that is what actually enforces it: `unlike`
+    is given no directory to write into, so it cannot grow a record file without
+    that becoming a visible, deliberate change to its interface.
+    """
+    import inspect
+
+    assert "likes_dir" not in inspect.signature(unlike).parameters
+    assert "likes_dir" in inspect.signature(like).parameters  # the contrast is the point
 
 
 def test_unliking_a_track_that_is_not_liked_is_harmless_not_an_error():
