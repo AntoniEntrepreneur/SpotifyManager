@@ -29,6 +29,7 @@ from spotify_manager.dedupe.execute import (
     RestoreFileError,
     batches_of,
     execute,
+    restore,
     restore_command_for,
 )
 from spotify_manager.dedupe.resolve import Resolution, RestoreAlbum
@@ -58,18 +59,19 @@ def resolution_of(count: int, *, kept: int = 0, skipped=()) -> Resolution:
 
 
 class FakeClient:
-    """Stands in for `SpotifyClient.delete_albums`, one call per batch.
+    """Stands in for `SpotifyClient.delete_albums` and `.save_albums`.
 
-    `script` maps a 1-based call number to what that call should do: `None` (or a
-    missing entry) succeeds, an exception instance is raised, and a callable is
-    invoked and may raise.
+    One call per batch to whichever method the test exercises. `script` maps a
+    1-based call number to what that call should do: `None` (or a missing entry)
+    succeeds, an exception instance is raised, and a callable is invoked and may
+    raise.
     """
 
     def __init__(self, script: dict[int, object] | None = None) -> None:
         self.calls: list[list[str]] = []
         self._script = script or {}
 
-    def delete_albums(self, ids: list[str]) -> None:
+    def _call(self, ids: list[str]) -> None:
         self.calls.append(list(ids))
         action = self._script.get(len(self.calls))
         if action is None:
@@ -79,8 +81,18 @@ class FakeClient:
             return
         raise action
 
+    def delete_albums(self, ids: list[str]) -> None:
+        self._call(ids)
+
+    def save_albums(self, ids: list[str]) -> None:
+        self._call(ids)
+
     @property
     def deleted_ids(self) -> list[str]:
+        return [album_id for call in self.calls for album_id in call]
+
+    @property
+    def saved_ids(self) -> list[str]:
         return [album_id for call in self.calls for album_id in call]
 
 
@@ -370,3 +382,79 @@ def test_an_empty_result_answers_every_question_without_pretending(tmp_path):
     assert result.failed_count == 0
     assert result.never_attempted_count == 0
     assert result.nothing_requested
+
+
+# -- restore: the mirror image of execute ------------------------------------
+
+
+def test_restoring_saves_every_album_in_the_largest_batches_the_api_permits():
+    ids = tuple(f"alb{i:04d}" for i in range(120))
+    client = FakeClient()
+
+    result = restore(ids, client, sleep=lambda seconds: None)
+
+    assert [len(call) for call in client.calls] == [50, 50, 20]
+    assert client.saved_ids == list(ids)
+    assert [b.status for b in result.batches] == [SUCCEEDED] * 3
+    assert result.removed_ids == ids
+    assert result.is_clean
+
+
+def test_restoring_already_saved_albums_is_harmless_not_an_error():
+    """Spotify's PUT is idempotent: re-saving a saved album is a no-op, not a
+    failure. The fake client here simply always succeeds -- exactly like the real
+    API does for an id that is already saved -- so this proves the command has no
+    special-case logic that would treat that as anything but success."""
+    ids = ("already-saved-1", "already-saved-2")
+    result = restore(ids, FakeClient(), sleep=lambda seconds: None)
+
+    assert result.is_clean
+    assert result.removed_ids == ids
+    assert result.failed_ids == ()
+
+
+def test_a_restore_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed():
+    ids = tuple(f"alb{i:04d}" for i in range(150))  # three batches
+    boom = RuntimeError("Spotify said no")
+    client = FakeClient({1: boom, 2: boom, 3: boom, 4: boom})
+
+    result = restore(ids, client, sleep=lambda seconds: None)
+
+    assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
+    assert result.failed_ids == ids[:50]
+    assert result.removed_ids == ids[50:]
+    assert not result.is_clean
+
+
+def test_a_restore_run_is_interrupted_like_a_deletion_run():
+    ids = tuple(f"alb{i:04d}" for i in range(200))  # four batches
+    client = FakeClient({2: KeyboardInterrupt()})
+
+    result = restore(ids, client, sleep=lambda seconds: None)
+
+    assert [b.status for b in result.batches] == [
+        SUCCEEDED,
+        FAILED,
+        NEVER_ATTEMPTED,
+        NEVER_ATTEMPTED,
+    ]
+    assert result.interrupted.startswith("KeyboardInterrupt")
+    assert len(client.calls) == 2
+
+
+def test_restoring_nothing_saves_nothing_and_writes_no_restore_file():
+    client = FakeClient()
+    result = restore((), client, sleep=lambda seconds: None)
+
+    assert client.calls == []
+    assert result.batches == ()
+    assert result.restore_path is None
+    assert result.nothing_requested
+    assert result.is_clean
+
+
+def test_restore_writes_no_restore_file_of_its_own():
+    """Unlike `execute`, `restore` has nothing to write first: the file it is
+    restoring from is already the record of what this run is doing."""
+    result = restore(("alb0001",), FakeClient(), sleep=lambda seconds: None)
+    assert result.restore_path is None

@@ -43,6 +43,15 @@ Rate limiting is not handled here. `RateLimitedSession` already honours Spotify'
 `Retry-After` on a 429 -- mid-deletion exactly as anywhere else -- and backs off on
 5xx, so a throttled batch simply takes longer to return and then succeeds. The retry
 loop here is the outer one, for the failures the session gives up on.
+
+`restore` is the mirror image of `execute`, undoing exactly what a restore file
+promises: it shares the batching, the retry-with-backoff and the three-way
+classification, because a restore run can fail in every way a deletion run can and
+deserves the same honesty about it. It has no restore file of its own to write --
+the file it is restoring *from* is already that record -- and it does not need any
+special handling for an album that turns out to already be saved, because PUT
+`/v1/me/albums` is idempotent on Spotify's side: re-saving a saved album is a
+no-op, not an error, so it is simply reported as succeeded like any other.
 """
 
 from __future__ import annotations
@@ -284,11 +293,12 @@ def execute(
                 BatchOutcome(number=number, album_ids=batch, status=NEVER_ATTEMPTED)
             )
             continue
-        outcome, interrupted = _remove_batch(
-            client,
+        outcome, interrupted = _issue_batch(
+            client.delete_albums,
             batch,
             number=number,
             total=len(planned),
+            verb="removing",
             max_attempts=max_attempts,
             sleep=sleep,
             say=say,
@@ -309,17 +319,92 @@ def execute(
     return result
 
 
-def _remove_batch(
+def restore(
+    album_ids: tuple[str, ...],
     client: Any,
+    *,
+    batch_size: int = ID_BATCH_LIMIT,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
+    on_progress: Callable[[str], None] | None = None,
+) -> ExecutionResult:
+    """Re-save every album a restore file listed, then say what happened.
+
+    Args:
+        album_ids: the ids to re-save, already read and validated by the caller
+            (`dedupe.restore.RestoreDocument.from_raw`) -- this function trusts its
+            input completely, the same way `execute` trusts a `Resolution`.
+        client: anything with `save_albums(list[str])`. One call per batch, so the
+            batching -- and therefore the classification -- is decided here.
+        max_attempts, sleep, on_progress: as in `execute`.
+
+    Returns:
+        An `ExecutionResult` in which every id appears in exactly one classification.
+        `restore_path` is always None: there is nothing to write, only something to
+        undo.
+    """
+    requested = tuple(album_ids)
+
+    def say(message: str) -> None:
+        if on_progress is not None:
+            on_progress(message)
+
+    if not requested:
+        say("Nothing to restore. No requests.")
+        return ExecutionResult(requested_ids=())
+
+    planned = list(batches_of(requested, batch_size))
+    outcomes: list[BatchOutcome] = []
+    interrupted: str | None = None
+
+    for index, batch in enumerate(planned):
+        number = index + 1
+        if interrupted is not None:
+            outcomes.append(
+                BatchOutcome(number=number, album_ids=batch, status=NEVER_ATTEMPTED)
+            )
+            continue
+        outcome, interrupted = _issue_batch(
+            client.save_albums,
+            batch,
+            number=number,
+            total=len(planned),
+            verb="restoring",
+            max_attempts=max_attempts,
+            sleep=sleep,
+            say=say,
+        )
+        outcomes.append(outcome)
+
+    result = ExecutionResult(
+        batches=tuple(outcomes),
+        requested_ids=requested,
+        interrupted=interrupted,
+    )
+    say(
+        f"Done: {result.removed_count} restored, {result.failed_count} failed, "
+        f"{result.never_attempted_count} never attempted."
+    )
+    return result
+
+
+def _issue_batch(
+    call: Callable[[list[str]], None],
     batch: tuple[str, ...],
     *,
     number: int,
     total: int,
+    verb: str,
     max_attempts: int,
     sleep: Callable[[float], None],
     say: Callable[[str], None],
 ) -> tuple[BatchOutcome, str | None]:
     """Issue one batch, retrying with increasing delays. Returns (outcome, interrupt).
+
+    Shared by `execute` (DELETE, `verb="removing"`) and `restore` (PUT,
+    `verb="restoring"`): the batching, retry and classification are exactly the same
+    shape either direction, only the request itself and the word in the progress
+    line differ.
 
     The second element is None unless the run was interrupted from outside, in which
     case it carries the reason and the caller must issue nothing more.
@@ -336,10 +421,10 @@ def _remove_batch(
                 say(f"Batch {number} failed ({last_error}); retrying in {wait:.1f}s.")
                 sleep(wait)
             say(
-                f"Batch {number}/{total}: removing {len(batch)} albums "
+                f"Batch {number}/{total}: {verb} {len(batch)} albums "
                 f"(attempt {attempt}/{max_attempts})."
             )
-            client.delete_albums(list(batch))
+            call(list(batch))
         except Exception as exc:  # noqa: BLE001 - any failure is this batch's failure
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < max_attempts:

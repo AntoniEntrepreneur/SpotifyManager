@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from . import report
-from .commands import dedupe_cmd, redact_cmd
+from .commands import dedupe_cmd, redact_cmd, restore_cmd
 from .errors import SpotifyManagerError
 
 
@@ -86,6 +86,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     redact_cmd.add_arguments(redact)
     redact.set_defaults(func=redact_cmd.run)
+
+    restore = subparsers.add_parser(
+        "restore",
+        help="re-save every album listed in a restore file",
+        description=(
+            "Read a restore file written by `dedupe`, fully parse and validate it, "
+            "and re-save every album it lists, in the largest batches the API "
+            "permits. A missing or malformed restore file produces a clear message "
+            "and restores nothing; re-saving an album that is already saved is "
+            "harmless. Throttling and transient errors are handled the same way "
+            "they are during deletion, and the command reports exactly how many "
+            "albums were restored, failed, or never attempted."
+        ),
+    )
+    restore_cmd.add_arguments(restore)
+    restore.set_defaults(func=restore_cmd.run)
 
     return parser
 
