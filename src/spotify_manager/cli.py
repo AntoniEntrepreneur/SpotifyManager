@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Before the first like is issued, a run record naming exactly the tracks "
             "the run set out to like is written to disk, so the run can be undone; "
             "if that record cannot be written, nothing is liked. Likes go out in "
-            "batches of fifty, oldest saved album first, and the command reports "
+            "batches of forty, oldest saved album first, and the command reports "
             "exactly how many tracks were liked, failed, or never attempted. "
             "Re-running finishes an interrupted run: it likes only what is still "
             "missing."
