@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from spotify_manager.batching import FAILED, NEVER_ATTEMPTED, SUCCEEDED
-from spotify_manager.likes.execute import like
+from spotify_manager.likes.execute import like, unlike
 from spotify_manager.likes.record import LikeRecord, RecordDocumentError, RecordFileError
 
 NOW = datetime(2026, 9, 5, 14, 30, 0, tzinfo=timezone.utc)
@@ -53,6 +53,10 @@ class FakeClient:
             raise KeyboardInterrupt()
         if self.batch_number in self.fail_on:
             raise RuntimeError("boom")
+
+    def remove_tracks(self, ids: list[str]) -> None:
+        """Undoing a run goes through the same fake, and fails the same ways."""
+        self.save_tracks(ids)
 
 
 def _ids(count: int) -> tuple[str, ...]:
@@ -96,7 +100,7 @@ def test_nothing_is_liked_when_the_run_record_cannot_be_written(tmp_path):
 def test_the_record_lists_what_the_run_set_out_to_do_not_what_worked(tmp_path):
     """A superset is harmless -- unliking an unliked track is a no-op. A subset is not."""
     client = FakeClient(fail_on={2})
-    like(_ids(120), client, likes_dir=tmp_path, now=NOW, batch_size=50, sleep=lambda _s: None)
+    like(_ids(120), client, likes_dir=tmp_path, now=NOW, batch_size=40, sleep=lambda _s: None)
 
     document = json.loads(_only_record(tmp_path).read_text(encoding="utf-8"))
     assert tuple(document["track_ids"]) == _ids(120)
@@ -186,3 +190,88 @@ def test_a_document_that_is_not_a_run_record_is_refused(raw):
 
 def test_an_empty_record_is_valid_and_means_nothing_to_undo():
     assert LikeRecord.from_raw({"track_ids": []}).track_ids == ()
+
+
+# -- unlike: the mirror image of like ----------------------------------------
+
+# The record file it is undoing *is* the record, so `unlike` writes nothing and takes
+# no `likes_dir`. Everything else -- the batch size, the retries, the three-way
+# classification -- is the same `batching` machinery, asserted here through this
+# feature's own vocabulary so a future change cannot quietly reroute it.
+
+
+def test_unliking_removes_every_track_in_the_largest_batches_the_api_permits():
+    client = FakeClient()
+    result = unlike(_ids(100), client, sleep=lambda _s: None)
+
+    assert [len(call) for call in client.calls] == [40, 40, 20]
+    assert [i for call in client.calls for i in call] == list(_ids(100))
+    assert [b.status for b in result.batches] == [SUCCEEDED] * 3
+    assert result.unliked_ids == _ids(100)
+    assert result.unliked_count == 100
+    assert result.is_clean
+
+
+def test_unliking_writes_no_record_of_its_own():
+    """The file being undone is already the record; a second one would be noise.
+
+    Asserted on the signature, because that is what actually enforces it: `unlike`
+    is given no directory to write into, so it cannot grow a record file without
+    that becoming a visible, deliberate change to its interface.
+    """
+    import inspect
+
+    assert "likes_dir" not in inspect.signature(unlike).parameters
+    assert "likes_dir" in inspect.signature(like).parameters  # the contrast is the point
+
+
+def test_unliking_a_track_that_is_not_liked_is_harmless_not_an_error():
+    """Spotify's DELETE is idempotent: removing a like that is not there is a no-op,
+    not a failure. The fake simply succeeds -- exactly as the real API does for an
+    unliked id -- so this proves there is no special case treating it otherwise, and
+    that a record which is a superset of what happened costs nothing."""
+    ids = ("never-liked-1", "never-liked-2")
+    result = unlike(ids, FakeClient(), sleep=lambda _s: None)
+
+    assert result.is_clean
+    assert result.unliked_ids == ids
+    assert result.failed_ids == ()
+
+
+def test_an_unlike_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed():
+    client = FakeClient(fail_on={1})
+    result = unlike(_ids(120), client, sleep=lambda _s: None)
+
+    assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
+    assert result.failed_ids == _ids(120)[:40]
+    assert result.unliked_ids == _ids(120)[40:]
+    assert not result.is_clean
+
+
+def test_an_unlike_run_is_interrupted_like_a_like_run():
+    client = FakeClient(interrupt_on=2)
+    result = unlike(_ids(120), client, sleep=lambda _s: None)
+
+    assert [b.status for b in result.batches] == [SUCCEEDED, FAILED, NEVER_ATTEMPTED]
+    assert result.unliked_count == 40
+    assert result.failed_count == 40
+    assert result.never_attempted_count == 40
+    assert result.interrupted.startswith("KeyboardInterrupt")
+    assert len(client.calls) == 2
+
+
+def test_unliking_nothing_issues_no_requests():
+    client = FakeClient()
+    result = unlike((), client, sleep=lambda _s: None)
+
+    assert client.calls == []
+    assert result.nothing_requested
+    assert result.is_clean
+
+
+def test_unlike_progress_names_the_batches_in_this_feature_s_words():
+    lines: list[str] = []
+    unlike(_ids(60), FakeClient(), sleep=lambda _s: None, on_progress=lines.append)
+
+    assert "Batch 1/2" in lines[0]
+    assert "unliking" in lines[0] and "tracks" in lines[0]

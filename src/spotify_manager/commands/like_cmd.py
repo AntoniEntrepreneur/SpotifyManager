@@ -23,12 +23,12 @@ accident:
 from __future__ import annotations
 
 import argparse
-import sys
 
 from ..config import Config, load_config
 from ..likes.execute import LikeResult, like
 from ..likes.models import liked_ids_from_raw, library_from_raw
 from ..likes.planner import format_plan, plan_likes
+from .confirm import confirmed as ask
 from .library import (
     build_client,
     complete_album_tracks,
@@ -124,28 +124,15 @@ def run(args: argparse.Namespace) -> int:
 def confirmed(count: int, *, assume_yes: bool, stream=None) -> bool:
     """Whether the user has actually agreed to like `count` tracks.
 
-    A prompt that cannot be answered is not a prompt. When stdin is not a terminal
-    and `--yes` was not given, this refuses rather than reading -- a redirect or a
-    CI job must never be able to approve this by accident, nor hang on it forever.
+    The rules -- and the reasons for them -- are `commands.confirm`'s, shared with
+    `unlike-tracks`; this only supplies the wording.
     """
-    if assume_yes:
-        return True
-    stream = stream if stream is not None else sys.stdin
-    if not (hasattr(stream, "isatty") and stream.isatty()):
-        print(
-            "Refusing to like tracks without confirmation: stdin is not a terminal.\n"
-            "Re-run with --yes to approve this, or --dry-run to see the plan.",
-            file=sys.stderr,
-        )
-        return False
-    # Read the stream we checked, rather than `input()`'s idea of stdin: the two
-    # must not be able to disagree about which thing was asked and which answered.
-    print(f"Like {count} tracks? Type 'yes' to confirm: ", end="", flush=True)
-    answer = stream.readline()
-    if not answer:  # EOF: the terminal went away mid-question. That is not a yes.
-        print()
-        return False
-    return answer.strip().lower() == "yes"
+    return ask(
+        f"Like {count} tracks?",
+        refusal="Refusing to like tracks without confirmation: stdin is not a terminal.",
+        assume_yes=assume_yes,
+        stream=stream,
+    )
 
 
 def format_results(result: LikeResult) -> str:
@@ -169,8 +156,13 @@ def format_results(result: LikeResult) -> str:
 
     lines += ["", "THIS RUN DID NOT FINISH. Some tracks may not have been liked."]
     lines += _listing(
+        "Refused by Spotify",
+        result.rejected_ids,
+        "Spotify rejected these requests outright; those tracks were not liked",
+    )
+    lines += _listing(
         "Failed",
-        result.failed_ids,
+        result.unknown_ids,
         "these requests were sent and errored; those tracks may or may not be liked",
     )
     lines += _listing(

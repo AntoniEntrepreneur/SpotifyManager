@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from . import report
-from .commands import dedupe_cmd, like_cmd, redact_cmd, restore_cmd
+from .commands import dedupe_cmd, like_cmd, redact_cmd, restore_cmd, unlike_cmd
 from .errors import SpotifyManagerError
 
 
@@ -125,6 +125,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     restore_cmd.add_arguments(restore)
     restore.set_defaults(func=restore_cmd.run)
+
+    unlike = subparsers.add_parser(
+        "unlike-tracks",
+        help="remove every like listed in a run record written by `like-album-tracks`",
+        description=(
+            "Read a run record written by `like-album-tracks`, fully parse and "
+            "validate it, and remove the like from every track it lists, in the "
+            "largest batches the API permits. This is how a like run is undone: the "
+            "record names exactly the tracks that run set out to like, which is the "
+            "only thing that tells them apart from likes made by hand. The count is "
+            "shown and nothing is removed until you confirm, because the record's "
+            "contents were chosen by the planner rather than by you: a track you had "
+            "already liked by hand can sit in one as a like the run never actually "
+            "made. A missing or "
+            "malformed run record produces a clear message and unlikes nothing; "
+            "removing a like that is not there is harmless, so a record listing more "
+            "than the run managed costs nothing. The record file is read, not "
+            "consumed -- re-running `like-album-tracks` is how this run is itself "
+            "undone -- though the original Liked Songs dates cannot be brought back. "
+            "Throttling and transient errors are handled the same way they are during "
+            "liking, and the command reports exactly how many tracks were unliked, "
+            "failed, or never attempted."
+        ),
+    )
+    unlike_cmd.add_arguments(unlike)
+    unlike.set_defaults(func=unlike_cmd.run)
 
     return parser
 

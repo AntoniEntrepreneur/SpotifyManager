@@ -32,6 +32,7 @@ from spotify_manager.dedupe.execute import (
     restore,
     restore_command_for,
 )
+from spotify_manager.batching import run_batches
 from spotify_manager.dedupe.resolve import Resolution, RestoreAlbum
 from spotify_manager.errors import ApiError
 from spotify_manager.infra.client import ID_BATCH_LIMIT
@@ -174,6 +175,43 @@ def test_batches_never_exceed_the_limit_and_lose_nothing():
     batches = list(batches_of(ids))
     assert [len(b) for b in batches] == [40, 40, 40, 17]
     assert [i for batch in batches for i in batch] == list(ids)
+
+
+def test_a_batch_larger_than_one_request_is_refused_rather_than_misreported():
+    """One batch must be one request, or the three-way classification is a guess.
+
+    The client re-chunks anything over `ID_BATCH_LIMIT` internally, so a batch of 80
+    would be two requests recorded as one outcome: if the second exhausted its
+    retries, all 80 ids would be reported failed -- including the 40 that
+    demonstrably succeeded. Refusing is the only answer that does not lie.
+
+    Asserted on `run_batches` itself, because the rule belongs to the shared batch
+    writer rather than to any one feature that calls it.
+    """
+    client = FakeClient()
+    with pytest.raises(ValueError, match="cannot be classified"):
+        run_batches(
+            client.delete_albums,
+            tuple(f"a{i}" for i in range(120)),
+            noun="albums",
+            verb="removing",
+            batch_size=ID_BATCH_LIMIT + 1,
+        )
+    assert client.calls == [], "nothing may go out under a batching we cannot report"
+
+
+def test_the_limit_itself_is_allowed():
+    """The boundary is legal: 40 is exactly one request, so refusing it would make
+    the default unusable."""
+    outcomes, interrupted = run_batches(
+        FakeClient().delete_albums,
+        tuple(f"a{i}" for i in range(40)),
+        noun="albums",
+        verb="removing",
+        batch_size=ID_BATCH_LIMIT,
+    )
+    assert [b.status for b in outcomes] == [SUCCEEDED]
+    assert interrupted is None
 
 
 # -- full success ------------------------------------------------------------

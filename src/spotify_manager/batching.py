@@ -212,6 +212,8 @@ def run_batches(
         ids: everything to write, in the order it should go out.
         noun: what the ids are, for the progress line ("albums", "tracks").
         verb: what is being done to them ("removing", "restoring", "liking").
+        batch_size: ids per batch, and therefore per request. May not exceed
+            `ID_BATCH_LIMIT`; see the ValueError below.
         max_attempts: total issues of one batch before it is called failed.
         sleep: injected so the backoff schedule can be asserted without waiting.
         say: called with one line per notable step, for the terminal.
@@ -219,7 +221,21 @@ def run_batches(
     Returns:
         (every batch's outcome in order, the interrupt reason or None). Every id
         appears in exactly one classification.
+
+    Raises:
+        ValueError: if `batch_size` exceeds `ID_BATCH_LIMIT`, which would make one
+            batch more than one request and the classification a guess.
     """
+    if batch_size > ID_BATCH_LIMIT:
+        # One batch must be one request, or the classification below is a guess. The
+        # client re-chunks anything larger at `ID_BATCH_LIMIT`, so a batch of 80
+        # would be two requests reported as one: if the second exhausted its retries,
+        # all 80 ids would be called failed, including the 40 that demonstrably
+        # succeeded. Refuse rather than report that.
+        raise ValueError(
+            f"batch_size {batch_size} exceeds the {ID_BATCH_LIMIT} items one request "
+            "may carry; a batch that is more than one request cannot be classified."
+        )
     planned = list(batches_of(ids, batch_size))
     outcomes: list[BatchOutcome] = []
     interrupted: str | None = None

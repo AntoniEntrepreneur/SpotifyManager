@@ -105,6 +105,10 @@ class SpotifyClient:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
             self._session.put_uris(_uris("track", chunk))
 
+    def remove_tracks(self, ids: list[str]) -> None:
+        for chunk in _chunks(ids, ID_BATCH_LIMIT):
+            self._session.delete_uris(_uris("track", chunk))
+
     def delete_albums(self, ids: list[str]) -> None:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
             self._session.delete_uris(_uris("album", chunk))
