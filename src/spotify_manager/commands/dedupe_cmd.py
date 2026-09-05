@@ -3,11 +3,11 @@
 The run loads the library (cache or API), computes the plan, prints it, archives a
 read-only copy of the report, then serves an interactive copy on a loopback port and
 blocks until the reviewer submits their decisions. Those decisions are resolved into
-an exact set of album ids, which is printed and nothing more. No album is deleted,
-no restore file is written and no ledger is updated: executing the resolution and
-recording the skipped groups are separate pieces of work, and keeping them separate
-is the point -- the mapping from ticks to deletions is built and verified with
-nothing irreversible attached to it.
+an exact set of album ids, which is printed and nothing more. Skipped groups are
+recorded in the not-duplicates ledger so the same comparisons are never proposed
+again. No album is deleted and no restore file is written: executing the resolution
+is a separate piece of work, and keeping it separate is the point -- the mapping
+from ticks to deletions is built and verified with nothing irreversible attached.
 
 Everything impure lives here. The planner, the resolver and the renderer are pure
 functions over data; deciding where the bytes go -- stdout, an archive file, a
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, load_config
+from ..dedupe import ledger
 from ..dedupe.models import DedupePlan, DuplicateGroup, snapshot_from_raw
 from ..dedupe.planner import plan as build_plan
 from ..dedupe.resolve import ApprovalPayload, Resolution, resolve_decisions
@@ -32,6 +33,20 @@ from .library import load_library
 
 def run(args: argparse.Namespace) -> int:
     config: Config = load_config()
+    ledger_file = ledger.ledger_path(config.state_dir)
+    if args.clear_decisions:
+        discarded = ledger.clear(ledger_file)
+        print(
+            f"Cleared {discarded} recorded 'not duplicates' pair(s) from {ledger_file}. "
+            "Groups suppressed by those decisions will be proposed again."
+        )
+        print()
+
+    recorded = ledger.load(ledger_file)
+    if recorded.warning:
+        print(recorded.warning)
+        print()
+
     result = load_library(config, refresh=args.refresh, verbose=args.verbose)
 
     source = (
@@ -40,13 +55,14 @@ def run(args: argparse.Namespace) -> int:
         else "Spotify API"
     )
     snapshot = snapshot_from_raw(result.snapshot)
-    dedupe_plan = build_plan(snapshot)
+    dedupe_plan = build_plan(snapshot, asserted_distinct=recorded.pairs)
 
     print("Saved-album library")
     print(f"  source          {source}")
     print(f"  pages fetched   {result.pages}")
     print(f"  requests made   {result.requests}")
     print(f"  elapsed         {result.elapsed_seconds:.2f}s")
+    print(f"  past decisions  {len(recorded)} pair(s) judged not duplicates")
     print()
     print(format_plan(dedupe_plan))
     print()
@@ -60,6 +76,17 @@ def run(args: argparse.Namespace) -> int:
     resolution = review(dedupe_plan, port=args.port, open_browser=not args.no_browser)
     if resolution is None:
         return 130
+
+    # A skip is a judgement about pairs of albums, and it is recorded before anything
+    # else happens with the resolution: the point of the ledger is that a question
+    # answered once is never asked again, even if the rest of the run goes wrong.
+    added = ledger.record(ledger_file, resolution.asserted_distinct_pairs)
+    if resolution.skipped_groups:
+        print()
+        print(
+            f"Recorded {added} new 'not duplicates' pair(s) from "
+            f"{len(resolution.skipped_groups)} skipped group(s) in {ledger_file}."
+        )
 
     print()
     print(format_resolution(resolution))
