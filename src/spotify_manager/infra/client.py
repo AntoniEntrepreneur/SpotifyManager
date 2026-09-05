@@ -18,8 +18,12 @@ from typing import Any
 
 #: The maximum page size /v1/me/albums permits.
 PAGE_LIMIT = 50
-#: The maximum number of ids DELETE/PUT /v1/me/albums accepts in a JSON body.
-ID_BATCH_LIMIT = 50
+#: The maximum number of items one library write may carry. Spotify's February 2026
+#: Web API changes replaced the per-entity writes (PUT/DELETE /v1/me/albums and
+#: /v1/me/tracks, which took 50 ids in a JSON body) with a single /v1/me/library
+#: endpoint, which takes at most 40 URIs in the query string: 41 is answered with
+#: `400 Too many uris requested`.
+ID_BATCH_LIMIT = 40
 
 
 class SpotifyClient:
@@ -91,9 +95,15 @@ class SpotifyClient:
 
         return items, pages
 
+    # -- library writes ------------------------------------------------------
+    #
+    # All three go through the one `/v1/me/library` endpoint, which identifies items
+    # by URI rather than by bare id, so each takes the ids its callers speak in and
+    # converts them on the way out. Callers never see a URI.
+
     def save_tracks(self, ids: list[str]) -> None:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
-            self._session.put_ids("/me/tracks", chunk)
+            self._session.put_uris(_uris("track", chunk))
 
     def remove_tracks(self, ids: list[str]) -> None:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
@@ -101,11 +111,16 @@ class SpotifyClient:
 
     def delete_albums(self, ids: list[str]) -> None:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
-            self._session.delete_ids("/me/albums", chunk)
+            self._session.delete_uris(_uris("album", chunk))
 
     def save_albums(self, ids: list[str]) -> None:
         for chunk in _chunks(ids, ID_BATCH_LIMIT):
-            self._session.put_ids("/me/albums", chunk)
+            self._session.put_uris(_uris("album", chunk))
+
+
+def _uris(kind: str, ids: list[str]) -> list[str]:
+    """`spotify:album:xyz` for each id -- the only form library writes accept."""
+    return [f"spotify:{kind}:{i}" for i in ids]
 
 
 def _chunks(values: list[str], size: int) -> Iterator[list[str]]:
