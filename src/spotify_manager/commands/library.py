@@ -27,6 +27,16 @@ class LoadResult:
     age_seconds: float
 
 
+def build_client(config: Config, *, verbose: bool) -> SpotifyClient:
+    """A client on its own rate-limited session.
+
+    One per phase rather than one per process: the fetch may not have happened at all
+    (a fresh snapshot answers from disk), so the phase that needs to write to the API
+    asks for its own.
+    """
+    return SpotifyClient(RateLimitedSession(TokenProvider(config), verbose=verbose))
+
+
 def load_library(config: Config, *, refresh: bool, verbose: bool) -> LoadResult:
     cache = LibraryCache(config.snapshot_path, SNAPSHOT_TTL_SECONDS)
     started = time.monotonic()

@@ -27,8 +27,18 @@ def real_plan():
 
 FORBIDDEN_IMPORTS = ("infra", "requests", "spotipy", "urllib", "pathlib", "time", "datetime")
 
+#: `execute.py` is the one module in this package that is deliberately impure: it
+#: writes the restore file and issues the deletions, which is exactly the work that
+#: cannot be done without a clock, a path and the API. It is exempt by name rather
+#: than by a looser rule, so that adding a *second* impure module to a package whose
+#: whole value is being pure has to be an explicit decision.
+IMPURE_BY_DESIGN = ("execute.py",)
 
-@pytest.mark.parametrize("module", sorted(p.name for p in DEDUPE_PACKAGE.glob("*.py")))
+
+@pytest.mark.parametrize(
+    "module",
+    sorted(p.name for p in DEDUPE_PACKAGE.glob("*.py") if p.name not in IMPURE_BY_DESIGN),
+)
 def test_the_planner_cannot_reach_the_io_shell(module):
     tree = ast.parse((DEDUPE_PACKAGE / module).read_text(encoding="utf-8"))
     imported: set[str] = set()

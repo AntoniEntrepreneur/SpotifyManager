@@ -28,7 +28,9 @@ from __future__ import annotations
 
 from html import escape
 
+from ..dedupe.execute import ExecutionResult
 from ..dedupe.models import AlbumJudgement, DedupePlan, DuplicateGroup, SavedAlbum
+from ..dedupe.resolve import Resolution
 
 #: Preferred cover-art edge length. The listing offers roughly 640/300/64px; 300 is
 #: the one that looks right at card size without downloading the largest asset.
@@ -550,12 +552,32 @@ _APPROVAL_SCRIPT = """
   }
 
   function fail(message) {
+    var veil = document.getElementById("working");
+    if (veil) veil.remove();
     note.textContent = message;
     note.classList.add("error");
     button.disabled = false;
   }
 
-  function done() {
+  function working() {
+    var panel = document.createElement("div");
+    panel.className = "done";
+    panel.id = "working";
+    panel.innerHTML =
+      "<div class=\\"panel\\"><h2>Applying your decisions…</h2>" +
+      "<p>The restore file is written before anything is removed. This page " +
+      "becomes the results view as soon as the run finishes.</p></div>";
+    document.body.appendChild(panel);
+  }
+
+  function done(body) {
+    // The run applies the decisions while this request is in flight, so by the time
+    // we are here the results view already exists. Go to it: the reviewer submitted
+    // from this tab and the outcome belongs in this tab.
+    if (body && body.results_url) {
+      window.location.href = body.results_url;
+      return;
+    }
     var panel = document.createElement("div");
     panel.className = "done";
     panel.innerHTML =
@@ -573,7 +595,10 @@ _APPROVAL_SCRIPT = """
     }
     button.disabled = true;
     note.classList.remove("error");
-    note.textContent = "Submitting…";
+    note.textContent =
+      "Approved. Removing the albums now — a restore file is written first. " +
+      "Leave this tab open; the results appear here when it finishes.";
+    working();
     fetch(APPROVE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -581,7 +606,7 @@ _APPROVAL_SCRIPT = """
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (body) {
         if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
-        done();
+        done(body);
       });
     }).catch(function (error) {
       fail("Could not submit: " + error.message + ". The run is still waiting; " +
@@ -954,5 +979,375 @@ def _footer(plan: DedupePlan, interactive: bool = False) -> str:
         '<p class="note">All styling and behaviour is embedded in this file; the only '
         "external references are the cover images, loaded from Spotify&rsquo;s CDN "
         "(i.scdn.co), which may not render offline or years from now.</p>"
+        "</footer>"
+    )
+
+
+# --------------------------------------------------------------------------- results
+
+#: Styling for the results view only. Appended to `_STYLE`, so the results page is the
+#: same document in the same skin -- the reviewer submitted from this page and lands
+#: back on it, and it should look like the place they were already standing.
+_RESULTS_STYLE = """
+/* ---------- results ---------- */
+.banner {
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  margin: 28px 0 4px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-left: 6px solid var(--muted);
+}
+.banner h2 { margin: 0 0 6px; font-size: 20px; letter-spacing: -0.01em; }
+.banner p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+.banner.ok { border-left-color: var(--keep); background: rgba(29, 185, 84, 0.07); }
+.banner.ok h2 { color: #7ee2a4; }
+.banner.bad {
+  border: 1px solid rgba(224, 85, 95, 0.55);
+  border-left: 6px solid var(--remove);
+  background: rgba(224, 85, 95, 0.1);
+}
+.banner.bad h2 { color: var(--remove); font-size: 23px; }
+.banner.bad strong { color: var(--remove); }
+.banner.none { border-left-color: var(--faint); }
+
+.stat.bad .n { color: var(--remove); }
+.stat.bad { border-color: rgba(224, 85, 95, 0.5); background: rgba(224, 85, 95, 0.07); }
+.stat.good .n { color: #7ee2a4; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  margin: 16px 0;
+}
+.panel.alarm { border-color: rgba(224, 85, 95, 0.55); background: rgba(224, 85, 95, 0.06); }
+.panel > h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+.panel.alarm > h3 { color: var(--remove); }
+.panel > p { margin: 6px 0 0; color: var(--muted); font-size: 13.5px; }
+pre.cmd {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  background: #0a0a0d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: #d7d7e2;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.path { color: #c9c9d4; word-break: break-all; }
+
+table.albums-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+table.albums-table th {
+  text-align: left;
+  color: var(--faint);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0 10px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+table.albums-table td {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid rgba(42, 42, 51, 0.55);
+  vertical-align: top;
+}
+table.albums-table td.name { color: var(--text); }
+table.albums-table td.artist { color: var(--muted); }
+table.albums-table td.idcell {
+  color: #4d4d59;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.batch {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 10px 0 0;
+  background: var(--surface-2);
+}
+.batch.failed { border-color: rgba(224, 85, 95, 0.5); }
+.batch .head { font-weight: 600; font-size: 13.5px; }
+.batch .err {
+  margin: 6px 0 0;
+  color: var(--remove);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-word;
+}
+.tag {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-right: 8px;
+}
+.tag.succeeded { background: var(--keep); color: #06210f; }
+.tag.failed { background: var(--remove); color: #2a0508; }
+.tag.never_attempted { background: var(--line); color: var(--text); }
+details.roll > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13.5px;
+  padding: 4px 0;
+}
+details.roll > summary:hover { color: var(--text); }
+"""
+
+
+def render_results_html(
+    result: ExecutionResult,
+    resolution: Resolution,
+    *,
+    restore_command: str,
+) -> str:
+    """Render what a run actually did, as one self-contained HTML document.
+
+    Pure: no filesystem, no network, no clock. Everything it states comes from the
+    `ExecutionResult` it is handed, so there is no path by which this page can be
+    more optimistic than the run was.
+
+    The page leads with a banner that states the outcome in the first line, and a
+    partial failure turns the whole page red rather than hiding behind a count in a
+    tile. A failure the reader has to look for is a failure that gets missed, and a
+    missed failure here means believing an album is gone when it is not.
+    """
+    parts: list[str] = [
+        "<!doctype html>",
+        '<html lang="en">',
+        "<head>",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f"<title>{escape(_results_title(result))}</title>",
+        f"<style>{_STYLE + _RESULTS_STYLE}</style>",
+        "</head>",
+        '<body class="reporting results">',
+        '<div class="wrap">',
+        _results_header(result),
+        _results_restore(result, restore_command),
+        _results_failures(result, resolution),
+        _results_never_attempted(result, resolution),
+        _results_removed(result, resolution),
+        _results_batches(result),
+        _results_footer(result, resolution),
+        "</div>",
+        "</body>",
+        "</html>",
+    ]
+    return "\n".join(part for part in parts if part) + "\n"
+
+
+def _results_title(result: ExecutionResult) -> str:
+    """The tab title says the outcome, because a tab is sometimes all you can see."""
+    if result.nothing_requested:
+        return "Nothing removed — dedupe results"
+    if result.is_clean:
+        return f"{result.removed_count} albums removed — dedupe results"
+    unfinished = result.failed_count + result.never_attempted_count
+    return f"INCOMPLETE — {unfinished} album(s) not removed"
+
+
+def _results_header(result: ExecutionResult) -> str:
+    if result.nothing_requested:
+        banner = (
+            '<div class="banner none"><h2>Nothing was removed.</h2>'
+            "<p>You approved no removals, so no restore file was written and no "
+            "request was sent to Spotify. Your library is exactly as it was.</p></div>"
+        )
+    elif result.is_clean:
+        banner = (
+            f'<div class="banner ok"><h2>All {result.removed_count} approved '
+            f"{_plural(result.removed_count, 'album')} removed.</h2>"
+            "<p>Every batch was accepted by Spotify. Nothing failed and nothing was "
+            "left unattempted. It is still undoable — see below.</p></div>"
+        )
+    else:
+        banner = (
+            '<div class="banner bad"><h2>This run did not finish. '
+            "Your library is not in the state the plan described.</h2>"
+            f"<p>Of the <strong>{result.requested_count}</strong> "
+            f"{_plural(result.requested_count, 'album')} you approved for removal, "
+            f"<strong>{result.removed_count}</strong> "
+            f"{_plural(result.removed_count, 'was', 'were')} removed, "
+            f"<strong>{result.failed_count}</strong> failed after every retry "
+            "(those requests were sent, so those albums may or may not still be "
+            f"saved), and <strong>{result.never_attempted_count}</strong> "
+            f"{_plural(result.never_attempted_count, 'was', 'were')} never attempted "
+            "at all (those are certainly still saved). The lists are below, in "
+            "full.</p>"
+            + (
+                f"<p>The run stopped early: {escape(result.interrupted)}.</p>"
+                if result.interrupted
+                else ""
+            )
+            + "</div>"
+        )
+
+    tiles = [
+        ("approved for removal", result.requested_count, ""),
+        ("removed", result.removed_count, "good" if result.removed_count else ""),
+        ("failed", result.failed_count, "bad" if result.failed_count else ""),
+        (
+            "never attempted",
+            result.never_attempted_count,
+            "bad" if result.never_attempted_count else "",
+        ),
+    ]
+    stats = "\n".join(
+        f'<div class="stat {css}"><span class="n">{value}</span>'
+        f'<span class="l">{escape(label)}</span></div>'
+        for label, value, css in tiles
+    )
+    return (
+        "<header>"
+        "<h1>Dedupe results</h1>"
+        '<p class="subtitle">What this run actually did, batch by batch. '
+        "Every album you approved appears in exactly one of the lists below.</p>"
+        f'<div class="stats">{stats}</div>'
+        "</header>"
+        f"{banner}"
+    )
+
+
+def _results_restore(result: ExecutionResult, restore_command: str) -> str:
+    """Where the undo lives and exactly what to type. Never below the fold."""
+    if result.restore_path is None:
+        return (
+            '<div class="panel"><h3>No restore file</h3>'
+            "<p>None was needed: this run removed nothing.</p></div>"
+        )
+    return (
+        '<div class="panel"><h3>Undo this run</h3>'
+        "<p>Every album this run set out to remove was written to a restore file "
+        "<em>before</em> the first deletion was sent:</p>"
+        f'<p class="path mono">{escape(str(result.restore_path))}</p>'
+        "<p>Re-save all of them with:</p>"
+        f'<pre class="cmd">{escape(restore_command)}</pre>'
+        "<p>The file lists what this run intended to remove, which may be more than "
+        "it managed to remove. Re-saving an album that is still saved changes "
+        "nothing, so running the restore is always safe.</p>"
+        "</div>"
+    )
+
+
+def _album_rows(ids: tuple[str, ...], resolution: Resolution) -> str:
+    known = {album.id: album for album in resolution.restore_albums}
+    rows = []
+    for album_id in ids:
+        album = known.get(album_id)
+        name = escape(album.name) if album else "<em>(unknown album)</em>"
+        artists = escape(album.artists) if album else ""
+        rows.append(
+            f'<tr><td class="name">{name}</td>'
+            f'<td class="artist">{artists}</td>'
+            f'<td class="idcell">{escape(album_id)}</td></tr>'
+        )
+    return (
+        '<table class="albums-table">'
+        "<thead><tr><th>Album</th><th>Artist</th><th>Spotify id</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _results_failures(result: ExecutionResult, resolution: Resolution) -> str:
+    ids = result.failed_ids
+    if not ids:
+        return ""
+    return (
+        '<div class="panel alarm"><h3>'
+        f"{len(ids)} {_plural(len(ids), 'album')} failed &mdash; state unknown</h3>"
+        "<p>These requests were sent to Spotify and did not come back successfully "
+        "after every retry. Spotify may have applied some of them before failing, so "
+        "these albums may or may not still be in your library. Check them, and "
+        "re-run the dedupe if they are still there.</p>"
+        f"{_album_rows(ids, resolution)}"
+        "</div>"
+    )
+
+
+def _results_never_attempted(result: ExecutionResult, resolution: Resolution) -> str:
+    ids = result.never_attempted_ids
+    if not ids:
+        return ""
+    return (
+        '<div class="panel alarm"><h3>'
+        f"{len(ids)} {_plural(len(ids), 'album')} never attempted &mdash; still saved</h3>"
+        "<p>The run stopped before these were sent to Spotify at all. No request was "
+        "ever issued for them, so they are still in your library exactly as they "
+        "were. Re-run the dedupe to finish the job.</p>"
+        f"{_album_rows(ids, resolution)}"
+        "</div>"
+    )
+
+
+def _results_removed(result: ExecutionResult, resolution: Resolution) -> str:
+    ids = result.removed_ids
+    if not ids:
+        return ""
+    return (
+        '<div class="panel"><h3>'
+        f"{len(ids)} {_plural(len(ids), 'album')} removed</h3>"
+        '<details class="roll"><summary>Show every album removed</summary>'
+        f"{_album_rows(ids, resolution)}</details></div>"
+    )
+
+
+def _results_batches(result: ExecutionResult) -> str:
+    """Every batch, in the order it was planned, with its own verdict.
+
+    Shown in full rather than only on failure: this is the audit trail, and an audit
+    trail that only appears when something went wrong teaches nobody what normal
+    looks like.
+    """
+    if not result.batches:
+        return ""
+    cards = []
+    for batch in result.batches:
+        label = batch.status.replace("_", " ")
+        attempts = (
+            f" after {batch.attempts} {_plural(batch.attempts, 'attempt')}"
+            if batch.attempts > 1
+            else ""
+        )
+        error = f'<p class="err">{escape(batch.error)}</p>' if batch.error else ""
+        cards.append(
+            f'<div class="batch {escape(batch.status)}">'
+            f'<div class="head"><span class="tag {escape(batch.status)}">'
+            f"{escape(label)}</span>"
+            f"Batch {batch.number} &mdash; {batch.size} "
+            f"{_plural(batch.size, 'album')}{attempts}</div>"
+            f"{error}</div>"
+        )
+    return (
+        '<div class="panel"><h3>Every batch</h3>'
+        "<p>Removals are sent 50 ids at a time, the most the API accepts in one "
+        "request. Each batch has exactly one verdict.</p>"
+        f"{''.join(cards)}</div>"
+    )
+
+
+def _results_footer(result: ExecutionResult, resolution: Resolution) -> str:
+    skipped = len(resolution.skipped_groups)
+    return (
+        "<footer>"
+        f"<p><strong>{len(resolution.kept)}</strong> "
+        f"{_plural(len(resolution.kept), 'album')} you chose to keep "
+        f"{_plural(len(resolution.kept), 'was', 'were')} left untouched, across "
+        f"<strong>{skipped}</strong> skipped {_plural(skipped, 'group')} and the "
+        "keepers of the groups you resolved.</p>"
+        f"<p>Run recorded at {escape(result.created_at)}.</p>"
+        '<p class="note">This page is a permanent record of one run; an archived copy '
+        "was written next to it on disk. All styling is embedded in this file.</p>"
         "</footer>"
     )

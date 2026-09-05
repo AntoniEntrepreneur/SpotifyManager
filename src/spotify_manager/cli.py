@@ -31,9 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
             "keeper, the key that grouped them and the decorations that were ignored "
             "to match. Tick exactly which albums to keep, skip any group you "
             "disagree with, and approve. The run waits for that decision with no "
-            "timeout, and can be abandoned with Ctrl-C. Nothing is deleted: this "
-            "version resolves the decisions into the exact set of albums that would "
-            "be removed, prints it, and stops."
+            "timeout, and can be abandoned with Ctrl-C. Approving carries the "
+            "decisions out: a timestamped restore file is written before anything "
+            "is removed, the albums are deleted in batches, and the page becomes a "
+            "results view stating exactly what succeeded, what failed and what was "
+            "never attempted."
         ),
     )
     dedupe.add_argument(
