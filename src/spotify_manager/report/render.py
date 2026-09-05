@@ -488,11 +488,17 @@ _SCRIPT = """
 _APPROVAL_SCRIPT = """
 (function () {
   var APPROVE_URL = "__APPROVE_URL__";
+  // An empty plan has no #groups element at all (see _groups()) -- there is
+  // nothing to list, sort or tick. But its approve bar still renders an
+  // "Approve — remove nothing" button (see _approve_bar()), and that button must
+  // still submit, or the run hangs forever waiting for a POST that can never
+  // come. So `list` is optional here; only `bar` (and the button it contains)
+  // is required for this script to do its job.
   var list = document.getElementById("groups");
   var bar = document.getElementById("approve-bar");
-  if (!list || !bar) return;
+  if (!bar) return;
 
-  var groups = Array.prototype.slice.call(list.querySelectorAll(".group"));
+  var groups = list ? Array.prototype.slice.call(list.querySelectorAll(".group")) : [];
   var button = document.getElementById("approve");
   var reset = document.getElementById("reset");
   var tally = document.getElementById("tally");
@@ -615,9 +621,11 @@ _APPROVAL_SCRIPT = """
     });
   }
 
-  list.addEventListener("change", function (event) {
-    if (event.target.matches("input.keep-box, input.skip-box")) update();
-  });
+  if (list) {
+    list.addEventListener("change", function (event) {
+      if (event.target.matches("input.keep-box, input.skip-box")) update();
+    });
+  }
   button.addEventListener("click", submit);
   reset.addEventListener("click", function () {
     groups.forEach(function (group) {

@@ -50,6 +50,7 @@ def test_snapshot_exactly_at_ttl_is_expired():
         {"albums": []},
         {"fetched_at": "not a timestamp", "albums": []},
         {"fetched_at": (NOW + timedelta(hours=1)).isoformat(), "albums": []},
+        {"fetched_at": 1700000000, "albums": []},
     ],
 )
 def test_unusable_timestamps_are_treated_as_stale(snapshot):

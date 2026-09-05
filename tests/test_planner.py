@@ -438,6 +438,21 @@ def test_a_trailing_year_is_ignored_when_comparing():
     assert "1969" in result.groups[0].ignored_decorations
 
 
+def test_a_bare_trailing_year_never_merges_distinct_albums():
+    # "Live At Wembley 1998" and "Live At Wembley 1999" are two different concerts,
+    # not two editions of the same one -- a bare trailing year (no bracketing, no
+    # recognised marker) is not a positively-recognised edition marker, so stripping
+    # it would be a guess that produces a wrong deletion. Only a bracketed year, as
+    # in "(1969)", is safe to take as rank-neutral.
+    result = plan(
+        snapshot(
+            album("a", "Live At Wembley 1998"),
+            album("b", "Live At Wembley 1999"),
+        )
+    )
+    assert result.groups == ()
+
+
 def test_equal_rank_and_tracks_prefers_the_later_release():
     result = plan(
         snapshot(
@@ -456,6 +471,23 @@ def test_equal_rank_prefers_more_tracks_even_over_a_later_release():
         )
     )
     assert result.groups[0].keeper_id == "fuller"
+
+
+def test_an_exact_tie_keeps_the_same_member_the_report_lists_first():
+    # "aaa" and "zzz" tie on every ranking field (rank, tracks, release date), so
+    # the keeper choice must not depend on snapshot order -- it must agree with the
+    # id-based tiebreak the following sort uses, so the group's first-listed member
+    # (members[0]) is the keeper, not some other tied member.
+    result = plan(
+        snapshot(
+            album("aaa", "Greatest Album"),
+            album("zzz", "Greatest Album"),
+        )
+    )
+    group = result.groups[0]
+    assert group.keeper_id == "zzz"
+    assert group.members[0].album.id == group.keeper_id
+    assert group.members[0].is_keeper
 
 
 def test_an_empty_library_plans_nothing():

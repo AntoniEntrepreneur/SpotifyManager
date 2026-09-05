@@ -41,7 +41,7 @@ def is_fresh(snapshot: dict[str, Any], ttl_seconds: float, now: datetime | None 
     """
     try:
         age = snapshot_age_seconds(snapshot, now)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return False
     if age < 0:
         return False

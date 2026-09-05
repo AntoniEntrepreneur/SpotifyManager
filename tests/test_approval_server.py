@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -190,6 +191,76 @@ def test_a_payload_that_does_not_describe_this_plan_leaves_the_run_waiting(serve
     assert status == 400
     assert "group 99999" in body["error"]
     assert waiter.still_waiting()
+
+
+def test_an_unexpected_interpret_failure_answers_the_post_and_leaves_the_run_waiting(real_plan):
+    """`interpret` can fail for reasons that have nothing to do with the payload --
+    a full disk or a read-only state dir while recording the ledger, say -- and
+    those raise plain `OSError`/`ValueError`, not `SpotifyManagerError`. That must
+    not vanish into a stderr traceback with the POST left unanswered forever; the
+    reviewer must see an error and still be able to try again."""
+    html = render_plan_html(real_plan, approve_url=APPROVE_PATH)
+
+    def interpret(raw: Any) -> Resolution:
+        raise OSError("disk is full")
+
+    server = ApprovalServer(html, interpret=interpret, port=0).start()
+    waiter = _Waiter(server)
+    try:
+        status, body = post(
+            server.url.rstrip("/") + APPROVE_PATH, payload_of(approve_plan_unmodified(real_plan))
+        )
+        assert status == 500
+        assert "disk is full" in body["error"]
+        assert waiter.still_waiting()
+    finally:
+        server.stop()
+
+
+def test_two_concurrent_submissions_never_both_apply(real_plan, tmp_path: Path):
+    """Two POSTs racing in before either has set the decision event must not both
+    pass the has-decision check: only one may ever reach `interpret`. Without a
+    lock around the check-and-apply, both requests read `has_decision == False`
+    before either sets it."""
+    release = threading.Event()
+    calls: list[dict] = []
+
+    def interpret(raw: Any) -> Resolution:
+        calls.append(raw)
+        # Hold the first request inside `interpret` for a moment so the second
+        # request has every chance to race in behind it before this returns.
+        release.wait(timeout=5)
+        return resolve_decisions(real_plan, ApprovalPayload.from_raw(raw))
+
+    html = render_plan_html(real_plan, approve_url=APPROVE_PATH)
+    server = ApprovalServer(html, interpret=interpret, port=0).start()
+    endpoint = server.url.rstrip("/") + APPROVE_PATH
+    payload = payload_of(approve_plan_unmodified(real_plan))
+
+    results: list[tuple[int, dict]] = []
+
+    def submit() -> None:
+        try:
+            results.append(post(endpoint, payload, timeout=10))
+        except Exception as exc:  # pragma: no cover - surfaced via the assertion below
+            results.append((-1, {"error": repr(exc)}))
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    try:
+        for thread in threads:
+            thread.start()
+        # Give the lock-holder's interpret() a moment to start before releasing it,
+        # so the second request has every chance to race in behind it.
+        time.sleep(0.3)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+    finally:
+        server.stop()
+
+    assert len(calls) == 1, "a second POST reached interpret() while the first was still applying"
+    statuses = sorted(status for status, _ in results)
+    assert statuses == [200, 409]
 
 
 def test_a_body_that_is_not_json_leaves_the_run_waiting(served):

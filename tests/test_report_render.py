@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -256,6 +257,46 @@ def test_an_empty_plan_still_renders_an_approvable_document():
     assert "No duplicate editions found." in html
     assert 'id="approve"' in html
     assert html.strip().endswith("</html>")
+
+
+def test_the_empty_plans_approve_button_actually_submits(tmp_path):
+    """A string containing 'id="approve"' proves the button exists, not that
+    clicking it does anything. The approval script used to open with
+    `if (!list || !bar) return;` -- for an empty plan there is no `#groups`
+    element (see _groups()), so that guard returned before the click listener
+    was ever attached, and the button did nothing forever. Drive the actual
+    emitted script in a real JS engine and click the actual button to prove the
+    fix holds: the click must reach `fetch` and post an empty decision, not
+    nothing at all.
+    """
+    html = render_plan_html(DedupePlan(total_albums_scanned=12), approve_url="/approve")
+    assert 'id="groups"' not in html  # confirms this is exercising the empty path
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts
+    script_path = tmp_path / "approval.js"
+    script_path.write_text("\n".join(scripts), encoding="utf-8")
+
+    elements = {
+        "approve-bar": {},
+        "approve": {"textContent": "Approve — remove nothing"},
+        "reset": {"hidden": True},
+        "tally": {"textContent": "Nothing to review."},
+        "bar-note": {"textContent": "Nothing has been deleted yet."},
+    }
+    runner = Path(__file__).parent / "fixtures" / "run_approval_script.js"
+    result = subprocess.run(
+        ["node", str(runner), str(script_path), json.dumps(elements)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome["fetchCalls"], "clicking Approve never called fetch() -- the run would hang"
+    url, body = outcome["fetchCalls"][0]
+    assert url == "/approve"
+    assert json.loads(body) == {"groups": {}}
 
 
 # --------------------------------------------------------------------------
