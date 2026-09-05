@@ -250,8 +250,13 @@ def format_results(applied: Applied) -> str:
 
     lines += ["", "THIS RUN DID NOT FINISH. Your library is not what the plan described."]
     lines += listing(
+        "Refused by Spotify",
+        result.rejected_ids,
+        "Spotify rejected these requests outright; those albums are still saved",
+    )
+    lines += listing(
         "Failed",
-        result.failed_ids,
+        result.unknown_ids,
         "these requests were sent and errored; those albums may or may not still be saved",
     )
     lines += listing(

@@ -33,6 +33,7 @@ from spotify_manager.dedupe.execute import (
     restore_command_for,
 )
 from spotify_manager.dedupe.resolve import Resolution, RestoreAlbum
+from spotify_manager.errors import ApiError
 from spotify_manager.infra.client import ID_BATCH_LIMIT
 
 NOW = datetime(2026, 9, 3, 14, 30, 0, tzinfo=timezone.utc)
@@ -214,6 +215,63 @@ def test_a_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed(tmp
     # Every album appears in exactly one classification, and all of them appear.
     assert set(result.removed_ids) | set(result.failed_ids) == set(resolution.to_delete)
     assert len(client.calls) == 6
+
+
+def test_a_batch_spotify_refused_is_failed_but_certainly_unapplied(tmp_path):
+    """A 4xx is a refusal to act, so no album in that batch was removed. The report
+    is allowed to promise those albums are still saved, which it may never do for a
+    failure that might have applied first."""
+    refused = ApiError("Spotify refused the request (403).", status=403)
+    client = FakeClient({1: refused, 2: refused, 3: refused, 4: refused})
+
+    result = run(resolution_of(60), client, tmp_path, sleep=lambda _s: None)
+
+    assert result.batches[0].status == FAILED
+    assert result.batches[0].error_status == 403
+    assert result.batches[0].rejected
+    assert result.rejected_ids == result.failed_ids
+    assert result.unknown_ids == ()
+
+
+def test_a_batch_that_died_without_a_status_stays_unknown(tmp_path):
+    """A timeout may have reached Spotify and applied before the error came back."""
+    boom = ApiError("Spotify is still rate limiting this app.")
+    client = FakeClient({1: boom, 2: boom, 3: boom, 4: boom})
+
+    result = run(resolution_of(10), client, tmp_path, sleep=lambda _s: None)
+
+    assert result.batches[0].error_status is None
+    assert not result.batches[0].rejected
+    assert result.unknown_ids == result.failed_ids
+    assert result.rejected_ids == ()
+
+
+def test_one_attempt_without_a_status_makes_the_whole_batch_unknown(tmp_path):
+    """The safe direction: an attempt we cannot account for outweighs the refusals
+    around it, because that attempt may be the one that applied."""
+    refused = ApiError("Forbidden", status=403)
+    client = FakeClient(
+        {1: refused, 2: TimeoutError("read timed out"), 3: refused, 4: refused}
+    )
+
+    result = run(resolution_of(10), client, tmp_path, sleep=lambda _s: None)
+
+    assert result.batches[0].status == FAILED
+    assert result.batches[0].error_status is None
+    assert result.unknown_ids == result.failed_ids
+
+
+def test_an_interrupted_batch_is_never_treated_as_refused(tmp_path):
+    """Ctrl-C mid-request leaves the state genuinely unknown, whatever else failed."""
+    def interrupt(_ids):
+        raise KeyboardInterrupt()
+
+    client = FakeClient({1: interrupt})
+    result = run(resolution_of(10), client, tmp_path)
+
+    assert result.batches[0].status == FAILED
+    assert not result.batches[0].rejected
+    assert result.unknown_ids == result.failed_ids
 
 
 def test_a_failed_batch_is_retried_with_increasing_delays(tmp_path):

@@ -16,33 +16,12 @@ albums it managed to remove. That is deliberate. Re-saving an album that is stil
 saved is a no-op on Spotify's side, so a restore file that is a superset of what was
 actually deleted is harmless; one that is a subset is a lost album.
 
-**Every batch is classified, and nothing is summarised away.** A batch is exactly one
-of:
-
-* ``succeeded``  -- the API accepted it, and those albums are gone.
-* ``failed``     -- it was issued, every retry was exhausted, and the albums in it are
-  in an *unknown* state (the request may have applied before the error).
-* ``never_attempted`` -- no request was ever issued for it, so those albums are
-  certainly still in the library.
-
-The distinction between the last two is the entire point of this module. Collapsing
-them into "some deletions failed" would tell the user their library is in a state it
-is not in.
-
-**A failed batch does not abandon the following batches.** Batches are independent --
-a rejected batch says nothing about the next one, and the failure that ends a run
-midway is far more often transient than systemic. Abandoning the rest would convert a
-small, precisely known failure into a large one, and the user would have to re-run and
-re-review to finish work they already approved. So a batch that exhausts its retries
-is recorded as ``failed`` and the run continues. The only thing that stops the run is
-an abrupt interrupt (Ctrl-C, a kill), which is a decision from outside the process and
-must be obeyed immediately; everything after it is reported as ``never_attempted``,
-because that is what it is.
-
-Rate limiting is not handled here. `RateLimitedSession` already honours Spotify's own
-`Retry-After` on a 429 -- mid-deletion exactly as anywhere else -- and backs off on
-5xx, so a throttled batch simply takes longer to return and then succeeds. The retry
-loop here is the outer one, for the failures the session gives up on.
+**How the batches are issued, retried and classified is not here.** That problem is
+identical for every write this tool makes, and lives in `spotify_manager.batching`:
+the three-way ``succeeded`` / ``failed`` / ``never_attempted`` classification, the
+rule that a failed batch does not abandon the following ones, and the rule that an
+interrupt stops the run at once and is never retried. What stays here is the part
+that is dedupe's alone -- that a restore file exists on disk before the first DELETE.
 
 `restore` is the mirror image of `execute`, undoing exactly what a restore file
 promises: it shares the batching, the retry-with-backoff and the three-way
@@ -59,25 +38,41 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..batching import (
+    DEFAULT_MAX_ATTEMPTS,
+    FAILED,
+    NEVER_ATTEMPTED,
+    SUCCEEDED,
+    BatchOutcome,
+    BatchResult,
+    batches_of,
+    run_batches,
+)
 from ..errors import SpotifyManagerError
 from ..infra.client import ID_BATCH_LIMIT
-from ..infra.http import backoff_delay
 from .resolve import Resolution
 
-#: The three -- and only three -- things that can be true of a batch.
-SUCCEEDED = "succeeded"
-FAILED = "failed"
-NEVER_ATTEMPTED = "never_attempted"
-
-#: How many times one batch is issued before it is called failed. Each retry waits
-#: longer than the last (see `backoff_delay`).
-DEFAULT_MAX_ATTEMPTS = 4
+__all__ = [
+    "Applied",
+    "BatchOutcome",
+    "DEFAULT_MAX_ATTEMPTS",
+    "ExecutionResult",
+    "FAILED",
+    "NEVER_ATTEMPTED",
+    "RestoreFileError",
+    "SUCCEEDED",
+    "batches_of",
+    "execute",
+    "restore",
+    "restore_command_for",
+    "write_restore_file",
+]
 
 #: Filename stamp shared by the restore file and the archived results report, so the
 #: two halves of one run's record sort together and are obviously the same run.
@@ -92,80 +87,24 @@ class RestoreFileError(SpotifyManagerError):
 
 
 @dataclass(frozen=True)
-class BatchOutcome:
-    """One request's worth of album ids, and what became of it."""
+class ExecutionResult(BatchResult):
+    """What one deletion or restoration run did, batch by batch.
 
-    number: int
-    album_ids: tuple[str, ...]
-    status: str
-    attempts: int = 0
-    error: str | None = None
-
-    @property
-    def size(self) -> int:
-        return len(self.album_ids)
-
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    """What actually happened, batch by batch. The only source for the results view.
-
-    Deliberately has no "succeeded" boolean and no "errors" list: every question a
-    caller might ask is answered by classifying batches, so there is no way to read
-    this object that quietly loses a failure.
+    The classification lives in `BatchResult`; what this adds is the pair of facts
+    only a dedupe run has -- where the restore file went, and when the run happened.
+    `removed_ids` is `succeeded_ids` under the name this feature reads it by.
     """
 
-    batches: tuple[BatchOutcome, ...] = ()
-    requested_ids: tuple[str, ...] = ()
     restore_path: Path | None = None
     created_at: str = ""
-    interrupted: str | None = None
-
-    def _ids(self, status: str) -> tuple[str, ...]:
-        return tuple(i for b in self.batches if b.status == status for i in b.album_ids)
 
     @property
     def removed_ids(self) -> tuple[str, ...]:
-        return self._ids(SUCCEEDED)
-
-    @property
-    def failed_ids(self) -> tuple[str, ...]:
-        """Albums whose removal was issued and errored: state unknown, not 'kept'."""
-        return self._ids(FAILED)
-
-    @property
-    def never_attempted_ids(self) -> tuple[str, ...]:
-        """Albums no request was ever issued for: certainly still in the library."""
-        return self._ids(NEVER_ATTEMPTED)
+        return self.succeeded_ids
 
     @property
     def removed_count(self) -> int:
-        return len(self.removed_ids)
-
-    @property
-    def failed_count(self) -> int:
-        return len(self.failed_ids)
-
-    @property
-    def never_attempted_count(self) -> int:
-        return len(self.never_attempted_ids)
-
-    @property
-    def requested_count(self) -> int:
-        return len(self.requested_ids)
-
-    @property
-    def failed_batches(self) -> tuple[BatchOutcome, ...]:
-        return tuple(b for b in self.batches if b.status == FAILED)
-
-    @property
-    def is_clean(self) -> bool:
-        """True when every album approved for removal is gone. Nothing else is clean."""
-        return self.removed_count == self.requested_count
-
-    @property
-    def nothing_requested(self) -> bool:
-        return not self.requested_ids
+        return self.succeeded_count
 
 
 @dataclass(frozen=True)
@@ -179,16 +118,6 @@ class Applied:
     resolution: Resolution
     result: ExecutionResult
     recorded_pairs: int = 0
-
-
-def batches_of(ids: tuple[str, ...], size: int = ID_BATCH_LIMIT) -> Iterator[tuple[str, ...]]:
-    """Split ids into the largest batches the endpoint permits.
-
-    50 ids per DELETE is the documented maximum for the JSON-body form, so a 1281
-    album library costs at most 26 requests even if all of it were approved.
-    """
-    for start in range(0, len(ids), size):
-        yield ids[start : start + size]
 
 
 def write_restore_file(
@@ -280,33 +209,19 @@ def execute(
     )
     say(f"Restore file written to {restore_path} ({len(requested)} albums).")
 
-    planned = list(batches_of(requested, batch_size))
-    outcomes: list[BatchOutcome] = []
-    interrupted: str | None = None
-
-    for index, batch in enumerate(planned):
-        number = index + 1
-        if interrupted is not None:
-            # No request was issued for this batch, and now none ever will be. Saying
-            # "failed" here would be a lie in the dangerous direction.
-            outcomes.append(
-                BatchOutcome(number=number, album_ids=batch, status=NEVER_ATTEMPTED)
-            )
-            continue
-        outcome, interrupted = _issue_batch(
-            client.delete_albums,
-            batch,
-            number=number,
-            total=len(planned),
-            verb="removing",
-            max_attempts=max_attempts,
-            sleep=sleep,
-            say=say,
-        )
-        outcomes.append(outcome)
+    outcomes, interrupted = run_batches(
+        client.delete_albums,
+        requested,
+        noun="albums",
+        verb="removing",
+        batch_size=batch_size,
+        max_attempts=max_attempts,
+        sleep=sleep,
+        say=say,
+    )
 
     result = ExecutionResult(
-        batches=tuple(outcomes),
+        batches=outcomes,
         requested_ids=requested,
         restore_path=restore_path,
         created_at=created_at,
@@ -353,31 +268,19 @@ def restore(
         say("Nothing to restore. No requests.")
         return ExecutionResult(requested_ids=())
 
-    planned = list(batches_of(requested, batch_size))
-    outcomes: list[BatchOutcome] = []
-    interrupted: str | None = None
-
-    for index, batch in enumerate(planned):
-        number = index + 1
-        if interrupted is not None:
-            outcomes.append(
-                BatchOutcome(number=number, album_ids=batch, status=NEVER_ATTEMPTED)
-            )
-            continue
-        outcome, interrupted = _issue_batch(
-            client.save_albums,
-            batch,
-            number=number,
-            total=len(planned),
-            verb="restoring",
-            max_attempts=max_attempts,
-            sleep=sleep,
-            say=say,
-        )
-        outcomes.append(outcome)
+    outcomes, interrupted = run_batches(
+        client.save_albums,
+        requested,
+        noun="albums",
+        verb="restoring",
+        batch_size=batch_size,
+        max_attempts=max_attempts,
+        sleep=sleep,
+        say=say,
+    )
 
     result = ExecutionResult(
-        batches=tuple(outcomes),
+        batches=outcomes,
         requested_ids=requested,
         interrupted=interrupted,
     )
@@ -386,82 +289,6 @@ def restore(
         f"{result.never_attempted_count} never attempted."
     )
     return result
-
-
-def _issue_batch(
-    call: Callable[[list[str]], None],
-    batch: tuple[str, ...],
-    *,
-    number: int,
-    total: int,
-    verb: str,
-    max_attempts: int,
-    sleep: Callable[[float], None],
-    say: Callable[[str], None],
-) -> tuple[BatchOutcome, str | None]:
-    """Issue one batch, retrying with increasing delays. Returns (outcome, interrupt).
-
-    Shared by `execute` (DELETE, `verb="removing"`) and `restore` (PUT,
-    `verb="restoring"`): the batching, retry and classification are exactly the same
-    shape either direction, only the request itself and the word in the progress
-    line differ.
-
-    The second element is None unless the run was interrupted from outside, in which
-    case it carries the reason and the caller must issue nothing more.
-
-    The delay before attempt *n* is `backoff_delay(n - 1)`: 1s, 2s, 4s, ... The wait
-    happens inside the same guarded block as the request, so an interrupt arriving
-    while we are waiting is classified exactly like one arriving mid-request.
-    """
-    last_error: str | None = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            if attempt > 1:
-                wait = backoff_delay(attempt - 1, jitter=0.25)
-                say(f"Batch {number} failed ({last_error}); retrying in {wait:.1f}s.")
-                sleep(wait)
-            say(
-                f"Batch {number}/{total}: {verb} {len(batch)} albums "
-                f"(attempt {attempt}/{max_attempts})."
-            )
-            call(list(batch))
-        except Exception as exc:  # noqa: BLE001 - any failure is this batch's failure
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt < max_attempts:
-                continue
-            say(f"Batch {number} failed after {attempt} attempts: {last_error}")
-            return (
-                BatchOutcome(
-                    number=number,
-                    album_ids=batch,
-                    status=FAILED,
-                    attempts=attempt,
-                    error=last_error,
-                ),
-                None,
-            )
-        except BaseException as exc:  # Ctrl-C, SystemExit: obey it, then report honestly.
-            # A request may already have been sent, so these albums are in an unknown
-            # state: failed, never "still there".
-            reason = f"{type(exc).__name__}: {exc}".strip().rstrip(":")
-            say(f"Interrupted during batch {number}. Issuing nothing further.")
-            return (
-                BatchOutcome(
-                    number=number,
-                    album_ids=batch,
-                    status=FAILED,
-                    attempts=attempt,
-                    error=f"interrupted before this batch was confirmed ({reason})",
-                ),
-                reason,
-            )
-        return (
-            BatchOutcome(
-                number=number, album_ids=batch, status=SUCCEEDED, attempts=attempt
-            ),
-            None,
-        )
-    raise AssertionError("unreachable: the loop returns on every path")  # pragma: no cover
 
 
 def restore_command_for(path: Path | None) -> str:

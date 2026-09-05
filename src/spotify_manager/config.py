@@ -49,6 +49,28 @@ class Config:
         return self.state_dir / "library_snapshot.json"
 
     @property
+    def liked_tracks_snapshot_path(self) -> Path:
+        """The Liked Songs snapshot, kept separately from the saved-album one.
+
+        Two files rather than one document with two keys: they answer different
+        questions and are invalidated at different moments -- `like-album-tracks`
+        deletes this one when it ends so the next run refetches, and has no business
+        throwing away a 1281-album fetch at the same time.
+        """
+        return self.state_dir / "liked_tracks_snapshot.json"
+
+    @property
+    def likes_dir(self) -> Path:
+        """Where every run that likes something writes its record file first.
+
+        Deliberately not `restores_dir`. A restore file means "albums I deleted, save
+        these back"; a like record means "tracks I added, delete these to undo". The
+        two hold different kinds of id and are undone by different commands, and a
+        shared directory would eventually let one be handed to the other.
+        """
+        return self.state_dir / "likes"
+
+    @property
     def restores_dir(self) -> Path:
         """Where every run that deletes something writes its restore file first.
 

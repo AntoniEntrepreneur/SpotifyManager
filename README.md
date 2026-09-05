@@ -5,10 +5,11 @@ construction is saved-album deduplication: finding albums saved twice under diff
 editions (a plain release alongside a Deluxe or Remastered one) and proposing a
 cleanup that only ever runs after explicit approval.
 
-**Current state:** read-only. `dedupe` authenticates, downloads the entire
-saved-album library, caches it locally, works out which albums are duplicate editions
-of each other, and prints the proposal as plain text. Nothing is modified: reviewing
-and approving in a browser, and the deletion itself, come next.
+**Current state:** `dedupe` reviews and, once approved in the browser, carries out the
+cleanup, writing a restore file before it removes anything; `restore` puts back
+everything a restore file lists. `like-album-tracks` likes every song on every saved
+album that is not liked yet, writing a run record before it adds anything. Nothing is
+ever written to Spotify without an explicit approval and a way back.
 
 ## Setup
 
@@ -46,7 +47,9 @@ pip install -e ".[dev]"
 ## Commands
 
 ```
-spotify-manager dedupe [--refresh] [--verbose]
+spotify-manager dedupe [--refresh] [--no-browser] [--port PORT] [--clear-decisions] [--verbose]
+spotify-manager like-album-tracks [--refresh] [--yes] [--dry-run] [--rate PER_SECOND] [--verbose]
+spotify-manager restore RESTORE_FILE [--verbose]
 spotify-manager redact-snapshot [--source PATH] [--output PATH]
 ```
 
@@ -76,6 +79,56 @@ after six hours the snapshot expires on its own and is refetched.
 * `--refresh` bypasses the snapshot and fetches from Spotify.
 * `--verbose` prints every API request to stderr.
 
+### `like-album-tracks`
+
+Likes every song on every saved album that is not already in Liked Songs.
+
+Track lists come from the saved-album snapshot the tool already holds -- the listing
+endpoint embeds each album's tracks -- so working out what to like costs no requests
+at all. Only an album with more tracks than that listing carries is fetched
+individually; on a 1,281-album library that is two albums.
+
+The same recording saved on two editions of one record is liked **once**. A standard
+edition and a deluxe, an original and its remaster, an album and a compilation that
+reprints one of its songs -- each carries its own track id for what is audibly the
+same performance, and Spotify will happily add both. On a real library that is around
+1,237 duplicated songs. The surviving copy comes from the richer edition, using the
+same edition ranking `dedupe` uses, and never from a compilation when a real album has
+the song. Matching is on title, artists and duration to the nearest second, which is a
+heuristic; see `docs/adr/0001-collapse-same-recording-by-name-artist-duration.md` for
+what that trades away.
+
+The plan is printed as counts -- albums scanned, tracks found, already liked, collapsed
+as duplicates, unlikeable -- and nothing is written until you type `yes`. If stdin is
+not a terminal, the command refuses rather than proceeding or hanging; pass `--yes` to
+approve it in a script.
+
+Before the first like is issued, a run record naming exactly the tracks the run set out
+to like is written to `.spotifymanager/likes/` and fsynced to disk. If it cannot be
+written, nothing is liked -- ten thousand likes you cannot identify are worse than a
+run that did not happen. Likes then go out in batches of fifty, oldest saved album
+first, and every batch is reported as succeeded, failed, or never attempted.
+
+An interrupted run is finished by running the command again: it likes only what is
+still missing.
+
+* `--refresh` bypasses both snapshots and fetches from Spotify.
+* `--yes` skips the confirmation. Required when stdin is not a terminal.
+* `--dry-run` prints the plan and exits, writing nothing and liking nothing.
+* `--rate PER_SECOND` lowers the client-side request ceiling for this run.
+* `--verbose` prints every API request to stderr.
+
+Note that every track a run likes is stamped by Spotify with the moment of the run, so
+a first full run puts one large block at the top of Liked Songs. Its internal order --
+oldest saved album first -- is the only ordering it will ever have.
+
+### `restore`
+
+Re-saves every album listed in a restore file written by `dedupe`. The file is fully
+parsed and validated before a single request goes out, so a missing or malformed
+restore file produces a clear message and restores nothing. Re-saving an album that is
+already saved is harmless.
+
 ### `redact-snapshot`
 
 Writes a redacted copy of the cached snapshot to
@@ -103,6 +156,15 @@ gitignored:
 * `token_cache.json` -- the OAuth token and refresh token. Delete it to force a fresh
   login.
 * `library_snapshot.json` -- the cached saved-album listing.
+* `liked_tracks_snapshot.json` -- the cached Liked Songs listing. `like-album-tracks`
+  deletes it when a run ends, so the next run refetches and does exactly the work that
+  is still outstanding.
+* `restores/` -- one file per `dedupe` run that deleted something, listing the albums
+  it set out to remove. `spotify-manager restore <file>` undoes that run.
+* `likes/` -- one file per `like-album-tracks` run, listing the tracks it set out to
+  like. Deliberately not the same directory as `restores/`: one holds album ids and one
+  holds track ids, and they are undone by different commands.
+* `reports/` -- the archived HTML report of each `dedupe` run.
 
 ## Rate limiting
 
@@ -113,6 +175,13 @@ guessing. Transient server errors are retried with exponentially increasing dela
 
 The library listing carries everything the deduplication logic needs, so no
 per-album request is ever made: a full run costs one request per fifty albums.
+
+`like-album-tracks` is the most request-hungry command, and it is still small: at
+worst about 320 requests on a 1,281-album library -- 26 to fetch the albums, one per
+fifty liked songs, and up to 215 to like around 9,500 tracks. Fifty ids per request is
+the API maximum, so that write count is a floor rather than a tuning knob. `--rate`
+lowers the ceiling if your app's quota turns out to be tighter than the default
+assumes.
 
 ## Development
 

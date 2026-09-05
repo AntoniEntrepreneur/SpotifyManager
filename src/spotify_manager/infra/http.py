@@ -199,7 +199,10 @@ class RateLimitedSession:
                 continue
 
             if response.status_code >= 400:
-                raise ApiError(_client_error_message(method, full_url, response))
+                raise ApiError(
+                    _client_error_message(method, full_url, response),
+                    status=response.status_code,
+                )
 
             return response
 
@@ -247,9 +250,53 @@ def _client_error_message(method: str, url: str, response: requests.Response) ->
             ".spotifymanager/token_cache.json and run the command again to log in."
         )
     if response.status_code == 403:
-        return (
-            "Spotify refused the request (403). The cached login is probably missing "
-            "a required permission. Delete .spotifymanager/token_cache.json and run "
-            f"the command again to re-authorise. Spotify said: {detail}"
-        )
+        return _forbidden_message(detail)
     return f"Spotify returned {response.status_code} for {method} {url}: {detail}"
+
+
+def _forbidden_message(detail: str) -> str:
+    """Explain a 403, which Spotify uses for two entirely different situations.
+
+    Spotify distinguishes them only in the message body, and the two need opposite
+    advice, so this branches on that message rather than on the status code:
+
+    * "Insufficient client scope" -- the token really is missing a permission, and
+      logging in again is the fix.
+    * anything else, in practice a bare "Forbidden" -- the token is fine and the
+      account simply is not allowed to use this app. Logging in again changes
+      nothing, and telling the user to do it sends them off to debug the one thing
+      that is not broken.
+    """
+    if "scope" in detail.lower():
+        return (
+            "Spotify refused the request (403) because the login it was made with "
+            "is missing a permission this command needs.\n"
+            "\n"
+            f"Spotify said: {detail}\n"
+            "\n"
+            "The cached login was granted a narrower set of permissions than this "
+            "command asks for. Delete .spotifymanager/token_cache.json and run the "
+            "command again: you will be sent through the Spotify login once more, "
+            "and the token that comes back will carry the missing permission."
+        )
+    return (
+        "Spotify refused the request (403). The access token is very likely fine -- "
+        "the account you logged in with is not authorised to use this app.\n"
+        "\n"
+        f"Spotify said: {detail}\n"
+        "\n"
+        "A Spotify app starts life in Development Mode, where only the accounts on "
+        "the app's own allowlist may call the API with it. An account that is not on "
+        "that list can still log in and receive a token with every permission "
+        "granted -- which is exactly why this looks like a missing permission -- but "
+        "every request that token makes comes back 403. Deleting the token cache and "
+        "logging in again will not change that.\n"
+        "\n"
+        "Add the account at https://developer.spotify.com/dashboard -> your app -> "
+        "Settings -> User Management, giving the name and the email address the "
+        "account is registered under. Development Mode allows up to 5 such users, "
+        "and the app's owner must have Spotify Premium.\n"
+        "\n"
+        "The two quota modes are explained at\n"
+        "https://developer.spotify.com/documentation/web-api/concepts/quota-modes"
+    )

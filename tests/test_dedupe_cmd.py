@@ -254,7 +254,7 @@ def _result(*batches: BatchOutcome, requested: tuple[str, ...], restore: Path | 
 
 def test_format_results_reports_a_clean_run():
     result = _result(
-        BatchOutcome(number=1, album_ids=("plain",), status="succeeded", attempts=1),
+        BatchOutcome(number=1, ids=("plain",), status="succeeded", attempts=1),
         requested=("plain",),
         restore=Path("/tmp/restores/restore-x.json"),
     )
@@ -292,7 +292,7 @@ def test_format_results_names_failed_and_never_attempted_albums():
     """A partial run names every album by id, and never rounds a failure away."""
     result = _result(
         BatchOutcome(
-            number=1, album_ids=("plain",), status="failed", attempts=4, error="boom"
+            number=1, ids=("plain",), status="failed", attempts=4, error="boom"
         ),
         requested=("plain",),
         restore=Path("/tmp/restores/restore-y.json"),
@@ -313,8 +313,8 @@ def test_format_results_names_failed_and_never_attempted_albums():
 def test_format_results_distinguishes_never_attempted_from_failed():
     """The two are not interchangeable: one is unknown, the other is certainly saved."""
     result = _result(
-        BatchOutcome(number=1, album_ids=("plain",), status="failed", attempts=4, error="boom"),
-        BatchOutcome(number=2, album_ids=("deluxe",), status="never_attempted"),
+        BatchOutcome(number=1, ids=("plain",), status="failed", attempts=4, error="boom"),
+        BatchOutcome(number=2, ids=("deluxe",), status="never_attempted"),
         requested=("plain", "deluxe"),
         restore=Path("/tmp/restores/restore-z.json"),
     )
@@ -328,6 +328,32 @@ def test_format_results_distinguishes_never_attempted_from_failed():
     assert "never attempted        1" in text
     assert "these requests were sent and errored" in text
     assert "no request was ever issued for these; they are still saved" in text
+
+
+def test_format_results_says_a_refused_batch_is_still_saved():
+    """The terminal and the results page must not tell two different stories: a 4xx
+    removed nothing, so neither is allowed to hedge about it."""
+    result = _result(
+        BatchOutcome(
+            number=1,
+            ids=("plain",),
+            status="failed",
+            attempts=4,
+            error="ApiError: Forbidden",
+            error_status=403,
+        ),
+        requested=("plain",),
+        restore=Path("/tmp/restores/restore-w.json"),
+    )
+    applied = Applied(
+        resolution=_resolution_approving_everything(), result=result, recorded_pairs=0
+    )
+
+    text = dedupe_cmd.format_results(applied)
+
+    assert "Refused by Spotify (1)" in text
+    assert "those albums are still saved" in text
+    assert "may or may not still be saved" not in text
 
 
 # --------------------------------------------------------------------------

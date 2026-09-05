@@ -1,9 +1,12 @@
-"""The local library snapshot: a plain JSON file with a time-to-live.
+"""A local library snapshot: a plain JSON file with a time-to-live.
 
-No daemon, no Redis -- a single file under the state directory. The snapshot holds
-the saved-album listing verbatim as the API returned it, so every later phase
-(planning, re-ranking, re-rendering) is a fully offline operation costing zero
-requests.
+No daemon, no Redis -- a single file under the state directory. A snapshot holds a
+listing verbatim as the API returned it, so every later phase (planning, re-ranking,
+re-rendering) is a fully offline operation costing zero requests.
+
+There are two of them: the saved albums, and the liked tracks. They differ only in
+which key holds the listing, so one class serves both rather than a second
+near-identical one drifting alongside the first.
 """
 
 from __future__ import annotations
@@ -49,9 +52,10 @@ def is_fresh(snapshot: dict[str, Any], ttl_seconds: float, now: datetime | None 
 
 
 class LibraryCache:
-    def __init__(self, path: Path, ttl_seconds: float) -> None:
+    def __init__(self, path: Path, ttl_seconds: float, key: str = "albums") -> None:
         self.path = path
         self.ttl_seconds = ttl_seconds
+        self.key = key
 
     def load(self, now: datetime | None = None) -> dict[str, Any] | None:
         """Return the snapshot if one exists and is still fresh, else None.
@@ -65,14 +69,32 @@ class LibraryCache:
             snapshot = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(snapshot, dict) or "albums" not in snapshot:
+        if not isinstance(snapshot, dict) or self.key not in snapshot:
             return None
         if not is_fresh(snapshot, self.ttl_seconds, now):
             return None
         return snapshot
 
-    def save(self, albums: list[dict[str, Any]]) -> dict[str, Any]:
-        snapshot = {"fetched_at": utcnow_iso(), "albums": albums}
+    def save(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        snapshot = {"fetched_at": utcnow_iso(), self.key: items}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
         return snapshot
+
+    def discard(self) -> bool:
+        """Delete the snapshot file, if it is there. Returns whether it was.
+
+        Used by a run that has just invalidated its own cache by writing to the
+        library. Deleting is the only honest option: a run's failed batches leave
+        ids in an unknown state, so updating the snapshot in place would mean
+        writing a guess into a cache that later runs will trust.
+        """
+        try:
+            self.path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            # A cache we cannot delete is a cache that will expire on its own. That
+            # is worth a slower next run, never a failed one.
+            return False

@@ -1186,14 +1186,7 @@ def _results_header(result: ExecutionResult) -> str:
             "Your library is not in the state the plan described.</h2>"
             f"<p>Of the <strong>{result.requested_count}</strong> "
             f"{_plural(result.requested_count, 'album')} you approved for removal, "
-            f"<strong>{result.removed_count}</strong> "
-            f"{_plural(result.removed_count, 'was', 'were')} removed, "
-            f"<strong>{result.failed_count}</strong> failed after every retry "
-            "(those requests were sent, so those albums may or may not still be "
-            f"saved), and <strong>{result.never_attempted_count}</strong> "
-            f"{_plural(result.never_attempted_count, 'was', 'were')} never attempted "
-            "at all (those are certainly still saved). The lists are below, in "
-            "full.</p>"
+            f"{_results_breakdown(result)}. The lists are below, in full.</p>"
             + (
                 f"<p>The run stopped early: {escape(result.interrupted)}.</p>"
                 if result.interrupted
@@ -1226,6 +1219,39 @@ def _results_header(result: ExecutionResult) -> str:
         "</header>"
         f"{banner}"
     )
+
+
+def _results_breakdown(result: ExecutionResult) -> str:
+    """The one sentence that says where every approved album actually ended up.
+
+    A failure Spotify refused outright is stated as flatly as a never-attempted one,
+    because it is exactly as certain: no album in a rejected batch was removed. Only
+    the failures we genuinely cannot account for are hedged, so that the hedge keeps
+    meaning something when the reader sees it.
+    """
+    clauses = [
+        f"<strong>{result.removed_count}</strong> "
+        f"{_plural(result.removed_count, 'was', 'were')} removed"
+    ]
+    if result.rejected_count:
+        clauses.append(
+            f"<strong>{result.rejected_count}</strong> "
+            f"{_plural(result.rejected_count, 'was', 'were')} refused by Spotify "
+            "before anything was changed (those are certainly still saved)"
+        )
+    if result.unknown_count:
+        clauses.append(
+            f"<strong>{result.unknown_count}</strong> failed after every retry "
+            "(those requests were sent, so those albums may or may not still be "
+            "saved)"
+        )
+    if result.never_attempted_count or not (result.rejected_count or result.unknown_count):
+        clauses.append(
+            f"<strong>{result.never_attempted_count}</strong> "
+            f"{_plural(result.never_attempted_count, 'was', 'were')} never attempted "
+            "at all (those are certainly still saved)"
+        )
+    return ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
 
 
 def _results_restore(result: ExecutionResult, restore_command: str) -> str:
@@ -1269,7 +1295,43 @@ def _album_rows(ids: tuple[str, ...], resolution: Resolution) -> str:
 
 
 def _results_failures(result: ExecutionResult, resolution: Resolution) -> str:
-    ids = result.failed_ids
+    """The failed albums, in two panels, because there are two kinds of failure.
+
+    A batch Spotify rejected with a 4xx never got as far as changing anything, so
+    those albums are as certainly still saved as a never-attempted one, and saying
+    "state unknown" about them would send the reader off to check a library that is
+    exactly as they left it. A batch that failed any other way -- a timeout, a
+    connection dropped mid-request, a 5xx that outlived its retries -- really might
+    have applied first, and keeps the unknown-state wording.
+    """
+    return _results_rejected(result, resolution) + _results_unknown(result, resolution)
+
+
+def _results_rejected(result: ExecutionResult, resolution: Resolution) -> str:
+    ids = result.rejected_ids
+    if not ids:
+        return ""
+    reasons = "".join(
+        f'<p class="err">Batch {batch.number}: {escape(batch.error or "")}</p>'
+        for batch in result.batches
+        if batch.rejected
+    )
+    return (
+        '<div class="panel alarm"><h3>'
+        f"{len(ids)} {_plural(len(ids), 'album')} refused by Spotify "
+        "&mdash; still saved</h3>"
+        "<p>Spotify rejected these requests outright, which means it did not remove "
+        "any of the albums in them: they are still in your library, exactly as they "
+        "were. Nothing here is half-done and nothing needs checking. Fix what the "
+        "error below names, then re-run the dedupe.</p>"
+        f"{reasons}"
+        f"{_album_rows(ids, resolution)}"
+        "</div>"
+    )
+
+
+def _results_unknown(result: ExecutionResult, resolution: Resolution) -> str:
+    ids = result.unknown_ids
     if not ids:
         return ""
     return (
