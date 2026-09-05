@@ -2,7 +2,7 @@
 
 Both features that write to Spotify -- removing saved albums, and liking the tracks
 on them -- face exactly the same problem: a few hundred ids, an endpoint that takes
-fifty at a time, a network that fails transiently, and a user who has to be told
+forty at a time, a network that fails transiently, and a user who has to be told
 afterwards what state their library is actually in. That problem is solved once,
 here, and the two features differ only in which call they hand over and what word
 appears in the progress line.
@@ -185,9 +185,9 @@ class BatchResult:
 def batches_of(ids: tuple[str, ...], size: int = ID_BATCH_LIMIT) -> Iterator[tuple[str, ...]]:
     """Split ids into the largest batches the endpoint permits.
 
-    50 ids per request is the documented maximum for the JSON-body form, so a 1281
-    album library costs at most 26 requests even if all of it were approved, and a
-    10,700 track library at most 215.
+    40 items per request is the maximum `/v1/me/library` accepts, so a 1281 album
+    library costs at most 33 requests even if all of it were approved, and a 10,700
+    track library at most 268.
     """
     for start in range(0, len(ids), size):
         yield ids[start : start + size]

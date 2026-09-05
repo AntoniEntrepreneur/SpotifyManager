@@ -106,7 +106,7 @@ approve it in a script.
 Before the first like is issued, a run record naming exactly the tracks the run set out
 to like is written to `.spotifymanager/likes/` and fsynced to disk. If it cannot be
 written, nothing is liked -- ten thousand likes you cannot identify are worse than a
-run that did not happen. Likes then go out in batches of fifty, oldest saved album
+run that did not happen. Likes then go out in batches of forty, oldest saved album
 first, and every batch is reported as succeeded, failed, or never attempted.
 
 An interrupted run is finished by running the command again: it likes only what is
@@ -177,9 +177,10 @@ The library listing carries everything the deduplication logic needs, so no
 per-album request is ever made: a full run costs one request per fifty albums.
 
 `like-album-tracks` is the most request-hungry command, and it is still small: at
-worst about 320 requests on a 1,281-album library -- 26 to fetch the albums, one per
-fifty liked songs, and up to 215 to like around 9,500 tracks. Fifty ids per request is
-the API maximum, so that write count is a floor rather than a tuning knob. `--rate`
+worst about 370 requests on a 1,281-album library -- 26 to fetch the albums, one per
+fifty liked songs, and up to 238 to like around 9,500 tracks. Forty items per request
+is the maximum the library write endpoint accepts, so that write count is a floor
+rather than a tuning knob. `--rate`
 lowers the ceiling if your app's quota turns out to be tighter than the default
 assumes.
 

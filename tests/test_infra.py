@@ -15,8 +15,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from spotify_manager.infra.cache import LibraryCache, is_fresh
+from spotify_manager.infra.client import ID_BATCH_LIMIT, SpotifyClient
 from spotify_manager.infra.http import (
     RETRY_AFTER_FALLBACK_SECONDS,
+    RateLimitedSession,
     _client_error_message,
     backoff_delay,
     parse_retry_after,
@@ -167,16 +169,40 @@ def test_a_missing_scope_403_says_to_log_in_again():
     assert "User Management" not in text
 
 
-def test_a_bare_forbidden_403_blames_the_allowlist_not_the_token():
-    """The one that cost real debugging time: a valid token, an unlisted account."""
+def test_a_bare_forbidden_403_names_every_likely_cause_and_asserts_none():
+    """The one that cost real debugging time -- twice, for opposite reasons.
+
+    Spotify says only "Forbidden", so the message must not pretend to know which of
+    several unrelated problems it is. A retired endpoint and an unlisted account both
+    look exactly like this, and confidently naming either one sends the reader off to
+    fix something that is not broken.
+    """
     text = _forbidden("Forbidden")
 
     assert "Forbidden" in text, "Spotify's own words, verbatim"
+    # The deprecation, which is what this actually was.
+    assert "february-2026" in text
+    assert "/v1/me/library" in text
+    # And the allowlist, which it can equally be.
     assert "User Management" in text
     assert "Development Mode" in text
     assert "quota-modes" in text
     # Deleting the token cache does not help here, so it must not be suggested.
     assert "token_cache.json" not in text
+
+
+def test_a_bare_forbidden_403_quotes_the_request_that_got_it():
+    """Which endpoint was called is the reader's main clue between the causes."""
+    text = _forbidden("Forbidden")
+
+    assert "DELETE https://api.spotify.com/v1/me/albums" in text
+
+
+def test_a_bare_forbidden_403_claims_no_single_cause():
+    """A phrasing guard: the old message asserted the allowlist as fact."""
+    text = _forbidden("Forbidden")
+
+    assert "the account you logged in with is not authorised" not in text
 
 
 def test_the_two_403_bodies_get_different_guidance():
@@ -195,6 +221,106 @@ def test_any_other_client_error_quotes_the_method_url_and_message():
     text = _client_error_message("PUT", "https://api.spotify.com/v1/me/albums", response)
 
     assert "400" in text and "PUT" in text and "bad id" in text
+
+
+# -- library writes ----------------------------------------------------------
+#
+# Spotify's February 2026 changes retired the per-entity library writes. Everything
+# below pins the shape of the replacement, because the endpoint it replaced answered
+# a bare 403 rather than saying anything about deprecation: a regression here would
+# come back as an error message pointing at the wrong thing entirely.
+
+
+class _OkResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+    content = b""
+    text = ""
+
+    def json(self) -> dict:
+        return {}
+
+
+class _RecordingHttp:
+    """Stands in for `requests.Session` inside the real `RateLimitedSession`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict | None, object]] = []
+
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+        self.calls.append((method, url, params, json))
+        return _OkResponse()
+
+
+class _Token:
+    def access_token(self) -> str:
+        return "token"
+
+
+def _recorded(write, ids):
+    """Run one client write through the real session, and return what it sent."""
+    session = RateLimitedSession(_Token(), requests_per_second=0)
+    http = _RecordingHttp()
+    session._session = http
+    write(SpotifyClient(session))(ids)
+    return http.calls
+
+
+def test_a_library_write_goes_to_the_one_endpoint_that_replaced_the_retired_ones():
+    calls = _recorded(lambda c: c.delete_albums, ["a1", "a2"])
+
+    assert [(m, u) for m, u, _p, _j in calls] == [
+        ("DELETE", "https://api.spotify.com/v1/me/library")
+    ]
+
+
+def test_ids_are_sent_as_uris_in_a_query_parameter_not_a_json_body():
+    """Verified against the live API: a JSON body is answered `Missing required
+    field: uris`, so the URIs must travel in the query string, comma-separated."""
+    (_method, _url, params, body), = _recorded(lambda c: c.delete_albums, ["a1", "a2"])
+
+    assert params == {"uris": "spotify:album:a1,spotify:album:a2"}
+    assert body is None
+
+
+def test_albums_and_tracks_each_get_their_own_uri_prefix():
+    (_m, _u, saved, _j), = _recorded(lambda c: c.save_albums, ["a1"])
+    (_m2, _u2, liked, _j2), = _recorded(lambda c: c.save_tracks, ["t1"])
+
+    assert saved == {"uris": "spotify:album:a1"}
+    assert liked == {"uris": "spotify:track:t1"}
+
+
+def test_saving_uses_put_and_removing_uses_delete():
+    assert _recorded(lambda c: c.save_albums, ["a1"])[0][0] == "PUT"
+    assert _recorded(lambda c: c.save_tracks, ["t1"])[0][0] == "PUT"
+    assert _recorded(lambda c: c.delete_albums, ["a1"])[0][0] == "DELETE"
+
+
+def test_no_request_carries_more_uris_than_the_endpoint_accepts():
+    """41 is answered `400 Too many uris requested`, so 40 is the whole budget."""
+    assert ID_BATCH_LIMIT == 40
+
+    calls = _recorded(lambda c: c.delete_albums, [f"a{i}" for i in range(81)])
+
+    sizes = [len(params["uris"].split(",")) for _m, _u, params, _j in calls]
+    assert sizes == [40, 40, 1]
+
+
+def test_exactly_forty_ids_still_go_out_in_one_request():
+    """The boundary itself: 40 is allowed, so splitting it would waste a request."""
+    calls = _recorded(lambda c: c.save_albums, [f"a{i}" for i in range(40)])
+
+    assert len(calls) == 1
+    assert len(calls[0][2]["uris"].split(",")) == 40
+
+
+def test_a_chunked_write_loses_nothing_and_keeps_its_order():
+    ids = [f"a{i:03d}" for i in range(95)]
+    calls = _recorded(lambda c: c.delete_albums, ids)
+
+    sent = [u for _m, _url, p, _j in calls for u in p["uris"].split(",")]
+    assert sent == [f"spotify:album:{i}" for i in ids]
 
 
 # -- fixture redaction -------------------------------------------------------

@@ -104,8 +104,8 @@ def test_the_record_lists_what_the_run_set_out_to_do_not_what_worked(tmp_path):
 
 def test_likes_go_out_in_the_largest_batches_the_api_permits(tmp_path):
     client = FakeClient()
-    like(_ids(120), client, likes_dir=tmp_path, now=NOW, sleep=lambda _s: None)
-    assert [len(call) for call in client.calls] == [50, 50, 20]
+    like(_ids(100), client, likes_dir=tmp_path, now=NOW, sleep=lambda _s: None)
+    assert [len(call) for call in client.calls] == [40, 40, 20]
     assert client.batch_number == 3
 
 
@@ -129,8 +129,8 @@ def test_a_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed(tmp
     client = FakeClient(fail_on={1})
     result = like(_ids(120), client, likes_dir=tmp_path, now=NOW, sleep=lambda _s: None)
 
-    assert result.failed_count == 50
-    assert result.liked_count == 70
+    assert result.failed_count == 40
+    assert result.liked_count == 80
     assert result.never_attempted_count == 0
     assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
     assert not result.is_clean
@@ -138,12 +138,12 @@ def test_a_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed(tmp
 
 def test_an_interrupt_partway_leaves_the_later_batches_never_attempted(tmp_path):
     client = FakeClient(interrupt_on=2)
-    result = like(_ids(150), client, likes_dir=tmp_path, now=NOW, sleep=lambda _s: None)
+    result = like(_ids(120), client, likes_dir=tmp_path, now=NOW, sleep=lambda _s: None)
 
     assert [b.status for b in result.batches] == [SUCCEEDED, FAILED, NEVER_ATTEMPTED]
-    assert result.liked_count == 50
-    assert result.failed_count == 50
-    assert result.never_attempted_count == 50
+    assert result.liked_count == 40
+    assert result.failed_count == 40
+    assert result.never_attempted_count == 40
     assert result.interrupted is not None
 
 
