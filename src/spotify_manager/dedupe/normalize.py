@@ -88,10 +88,6 @@ def normalize_title(name: str) -> NormalizedTitle:
         remainder = remainder[: bare_feature.start()]
 
     title = _fold(remainder)
-    trailing_year = re.search(r"\s((19|20)\d{2})$", title)
-    if trailing_year and title[: trailing_year.start()].strip():
-        decorations.append(Decoration(text=trailing_year.group(1)))
-        title = title[: trailing_year.start()].strip()
 
     if not title:
         # Stripping left nothing to compare (a title like "?"). Fall back to the

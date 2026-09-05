@@ -125,14 +125,22 @@ def review(
     """Serve the plan for review, and carry out whatever comes back.
 
     Returns what was approved and what happened to it, or None if the reviewer
-    interrupted the run from the terminal before approving anything. There is no
-    third outcome and no timeout: closing the browser tab is not an answer, so the
+    interrupted the run from the terminal before any decision had started being
+    applied. There is no timeout: closing the browser tab is not an answer, so the
     process simply keeps waiting for one.
 
     The apply runs on the request thread, inside the POST that submitted it. That is
     deliberate: it means the response can hand the browser a results page that is
     already rendered and already true, so the reviewer lands on the outcome in the
     tab they submitted from rather than on a promise that one is coming.
+
+    A Ctrl-C is delivered to *this* thread, never to the request thread doing the
+    deleting -- that is simply where CPython delivers SIGINT. So an interrupt that
+    lands after a POST has already started applying decisions cannot be reported as
+    "nothing changed": that would be a lie, and it is exactly the failure mode this
+    module exists to prevent. Instead the interrupt is acknowledged and the wait
+    resumes until the in-flight apply actually finishes, and the true outcome -- not
+    an assumption -- is what gets returned and printed.
     """
     html = render_plan_html(dedupe_plan, approve_url=APPROVE_PATH)
 
@@ -181,9 +189,21 @@ def review(
         try:
             return server.wait_for_decision()
         except KeyboardInterrupt:
+            if not server.is_applying:
+                print()
+                print("Run abandoned. Nothing in your library was changed.")
+                return None
+            # A POST had already started applying decisions when the interrupt
+            # landed -- it is running on the request thread, not this one, and
+            # cannot be un-started. Reporting "nothing changed" here would be
+            # false, so wait for the truth instead of guessing at it.
             print()
-            print("Run abandoned. Nothing in your library was changed.")
-            return None
+            print(
+                "Ctrl-C received, but a decision was already being applied and "
+                "cannot be undone mid-request. Waiting for it to finish so the "
+                "result reported is the truth."
+            )
+            return server.wait_for_decision()
 
 
 def format_results(applied: Applied) -> str:

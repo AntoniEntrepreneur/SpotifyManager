@@ -95,8 +95,13 @@ def _build_group(
             )
         )
 
-    keeper = max(ranked, key=lambda entry: keeper_sort_key(entry[0], entry[2]))[0]
-    ranked.sort(key=lambda entry: (keeper_sort_key(entry[0], entry[2]), entry[0].id), reverse=True)
+    # Break exact ties on album id, the same tiebreak the sort below uses, so the
+    # keeper always agrees with the top (first) row of the sorted member list.
+    def _keeper_key(entry: tuple[SavedAlbum, str, int, tuple[str, ...]]) -> tuple:
+        return (keeper_sort_key(entry[0], entry[2]), entry[0].id)
+
+    keeper = max(ranked, key=_keeper_key)[0]
+    ranked.sort(key=_keeper_key, reverse=True)
 
     ignored: list[str] = []
     for _, _, _, decorations in ranked:

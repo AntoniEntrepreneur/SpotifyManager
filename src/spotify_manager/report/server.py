@@ -11,10 +11,15 @@ The waiting is deliberate and unconditional:
   restarted from the fetch.
 * Closing the browser tab is not a cancellation. Nothing but a POST sets the event,
   so a closed tab simply means the reviewer will come back and reopen the page.
-* The one way out is a terminal interrupt, which the CLI turns into a plain message
-  rather than a traceback. That is why the wait polls a short interval instead of
-  blocking forever inside one lock acquisition: it keeps Ctrl-C responsive on every
-  platform without introducing a timeout in any meaningful sense.
+* The one way out is a terminal interrupt. If it arrives before any POST has started
+  applying decisions, the CLI turns it into a plain message and nothing has changed.
+  If it arrives after a POST has started -- SIGINT only ever reaches the main
+  thread, never the request thread actually running the deletions -- the CLI cannot
+  claim nothing changed, because something may already be running; see
+  `ApprovalServer.is_applying` and `dedupe_cmd.review`. That is why the wait polls a
+  short interval instead of blocking forever inside one lock acquisition: it keeps
+  Ctrl-C responsive on every platform without introducing a timeout in any
+  meaningful sense.
 
 The socket binds to the loopback address only. This page can approve deletions from
 someone's music library; it has no business being reachable from the network.
@@ -93,6 +98,20 @@ class ApprovalServer:
         self._decision: Any = None
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # Guards the has_decision check and the interpret-and-submit that follows
+        # it: `ThreadingHTTPServer` runs each request on its own thread, so without
+        # a lock two POSTs that both arrive before the first finishes would both
+        # see "no decision yet" and both apply.
+        self._submit_lock = threading.Lock()
+        # Set the instant a POST starts applying decisions (before `interpret`
+        # runs) and cleared only if that attempt fails outright. A Ctrl-C on the
+        # main thread interrupts `wait_for_decision`, not this request thread --
+        # SIGINT is only ever delivered to the main thread -- so by the time the
+        # main thread sees the interrupt, an apply that had already started is
+        # still running and cannot be un-started. `is_applying` is how the caller
+        # tells "nothing began yet" from "something is in flight and must be
+        # waited out so it can be reported truthfully".
+        self._applying = threading.Event()
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -150,7 +169,10 @@ class ApprovalServer:
     def wait_for_decision(self) -> Any:
         """Block until the page posts decisions this process understood.
 
-        Indefinite by design: no timeout, and nothing but a good POST returns.
+        Indefinite by design: no timeout, and nothing but a good POST returns. A
+        terminal interrupt raises `KeyboardInterrupt` out of this call (SIGINT is
+        delivered to the thread that is blocked here) -- it does not return; the
+        caller decides what an interrupt means using `is_applying`.
         """
         while not self._event.wait(_POLL_SECONDS):
             pass
@@ -163,6 +185,17 @@ class ApprovalServer:
     @property
     def has_decision(self) -> bool:
         return self._event.is_set()
+
+    @property
+    def is_applying(self) -> bool:
+        """Whether a POST has started applying decisions and may still be running.
+
+        True from the moment `interpret` is called until either it succeeds (and
+        stays true, alongside `has_decision`) or fails outright (and is cleared,
+        since a failed attempt changed nothing durable and the run is simply
+        waiting again).
+        """
+        return self._applying.is_set()
 
     @property
     def results_html(self) -> str | None:
@@ -228,28 +261,55 @@ def _make_handler(server: ApprovalServer) -> type[BaseHTTPRequestHandler]:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Decisions must be JSON."})
                 return
-            if server.has_decision:
-                # A second submission (a double click, or a stale tab) must never
-                # start a second run. The first decision is the decision.
-                self._json(
-                    HTTPStatus.CONFLICT,
-                    {"error": "Decisions were already submitted for this run."},
-                )
-                return
-            try:
-                decision = server._interpret(raw)
-            except SpotifyManagerError as exc:
-                # The payload does not describe this plan. Say so, change nothing,
-                # and keep waiting -- the reviewer can reload and submit again.
-                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                return
-            # `interpret` is where the run applies the decisions, so by this line the
-            # deletions have already happened and `decision` describes what happened.
-            # Rendering the results before unblocking the main thread means the page
-            # the reviewer is sent to is guaranteed to be there when they arrive.
-            if server._render_results is not None:
-                server._results_html = server._render_results(decision).encode("utf-8")
-            server._submit(decision)
+            # The has-decision check and the interpret-and-submit it guards must be
+            # one atomic step: two POSTs racing in on separate request threads must
+            # not both see "no decision yet" and both apply. See _submit_lock.
+            with server._submit_lock:
+                if server.has_decision:
+                    # A second submission (a double click, or a stale tab) must
+                    # never start a second run. The first decision is the decision.
+                    self._json(
+                        HTTPStatus.CONFLICT,
+                        {"error": "Decisions were already submitted for this run."},
+                    )
+                    return
+                # Set before `interpret` runs, not after: from this instant a Ctrl-C
+                # on the main thread must not claim nothing changed, because this
+                # request thread may already be mid-deletion. See `is_applying`.
+                server._applying.set()
+                try:
+                    decision = server._interpret(raw)
+                except SpotifyManagerError as exc:
+                    # The payload does not describe this plan. Say so, change
+                    # nothing, and keep waiting -- the reviewer can reload and
+                    # submit again.
+                    server._applying.clear()
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception as exc:
+                    # Anything else (a full disk, a read-only state dir, a corrupt
+                    # ledger) is not a rejected payload -- it is this process
+                    # failing before it could carry the decision out. It must not
+                    # vanish into a stderr traceback and leave the reviewer staring
+                    # at a POST that never answers: say so and keep waiting, so a
+                    # fixed environment lets them submit again.
+                    #
+                    # Clearing `_applying` is only honest because nothing
+                    # irreversible can have happened yet: `execute` classifies every
+                    # batch rather than raising (see `_issue_batch`, which returns on
+                    # every path including BaseException), so the only failures that
+                    # reach here come from before the first delete request.
+                    server._applying.clear()
+                    self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                    return
+                # `interpret` is where the run applies the decisions, so by this
+                # line the deletions have already happened and `decision`
+                # describes what happened. Rendering the results before
+                # unblocking the main thread means the page the reviewer is sent
+                # to is guaranteed to be there when they arrive.
+                if server._render_results is not None:
+                    server._results_html = server._render_results(decision).encode("utf-8")
+                server._submit(decision)
             if server._results_html is not None:
                 self._json(
                     HTTPStatus.OK,
