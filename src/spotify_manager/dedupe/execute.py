@@ -29,7 +29,7 @@ classification, because a restore run can fail in every way a deletion run can a
 deserves the same honesty about it. It has no restore file of its own to write --
 the file it is restoring *from* is already that record -- and it does not need any
 special handling for an album that turns out to already be saved, because PUT
-`/v1/me/albums` is idempotent on Spotify's side: re-saving a saved album is a
+`/v1/me/library` is idempotent on Spotify's side: re-saving a saved album is a
 no-op, not an error, so it is simply reported as succeeded like any other.
 """
 

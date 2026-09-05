@@ -31,6 +31,15 @@ from ..errors import ApiError
 
 API_BASE = "https://api.spotify.com/v1"
 
+#: The one endpoint every library write goes through. Spotify's February 2026 Web API
+#: changes retired the per-entity writes (PUT/DELETE /v1/me/albums, /v1/me/tracks, and
+#: their `contains` companions) in favour of this generic one, which takes items of any
+#: type. The retired endpoints answer a bare 403, so a call to one looks exactly like a
+#: permissions problem; see `_forbidden_message`.
+#: How many URIs one such write may carry is `client.ID_BATCH_LIMIT`, which lives
+#: with the code that does the chunking.
+LIBRARY_PATH = "/me/library"
+
 #: Client-side ceiling: at most this many requests per second, across the whole run.
 DEFAULT_REQUESTS_PER_SECOND = 3.0
 #: Seconds added to a `Retry-After` wait to survive clock and rounding skew.
@@ -125,13 +134,17 @@ class RateLimitedSession:
         response = self.request("GET", url, params=params)
         return response.json() if response.content else {}
 
-    def put_ids(self, path: str, ids: list[str]) -> None:
-        """PUT album ids in the JSON body (the body form allows 50 per call)."""
-        self.request("PUT", path, json={"ids": ids}, note=f"{len(ids)} ids")
+    def put_uris(self, uris: list[str]) -> None:
+        """Save items to the library. Chunked by the caller; see `ID_BATCH_LIMIT`."""
+        self.request(
+            "PUT", LIBRARY_PATH, params=_uris_param(uris), note=f"{len(uris)} uris"
+        )
 
-    def delete_ids(self, path: str, ids: list[str]) -> None:
-        """DELETE album ids in the JSON body (the body form allows 50 per call)."""
-        self.request("DELETE", path, json={"ids": ids}, note=f"{len(ids)} ids")
+    def delete_uris(self, uris: list[str]) -> None:
+        """Remove items from the library. Chunked by the caller, exactly like `put_uris`."""
+        self.request(
+            "DELETE", LIBRARY_PATH, params=_uris_param(uris), note=f"{len(uris)} uris"
+        )
 
     # -- the one code path ---------------------------------------------------
 
@@ -236,6 +249,16 @@ class RateLimitedSession:
             print(f"[api] {message}", file=sys.stderr, flush=True)
 
 
+def _uris_param(uris: list[str]) -> dict[str, str]:
+    """The query parameter a library write carries its items in.
+
+    `/v1/me/library` wants one comma-separated `uris` parameter in the query string.
+    A JSON body is not an accepted alternative: sending `{"uris": [...]}` there is
+    answered with `400 Missing required field: uris`.
+    """
+    return {"uris": ",".join(uris)}
+
+
 def _client_error_message(method: str, url: str, response: requests.Response) -> str:
     detail = ""
     try:
@@ -250,22 +273,24 @@ def _client_error_message(method: str, url: str, response: requests.Response) ->
             ".spotifymanager/token_cache.json and run the command again to log in."
         )
     if response.status_code == 403:
-        return _forbidden_message(detail)
+        return _forbidden_message(method, url, detail)
     return f"Spotify returned {response.status_code} for {method} {url}: {detail}"
 
 
-def _forbidden_message(detail: str) -> str:
-    """Explain a 403, which Spotify uses for two entirely different situations.
+def _forbidden_message(method: str, url: str, detail: str) -> str:
+    """Explain a 403, which Spotify uses for entirely different situations.
 
-    Spotify distinguishes them only in the message body, and the two need opposite
-    advice, so this branches on that message rather than on the status code:
+    Only one of them is self-describing, so this branches on Spotify's message rather
+    than on the status code:
 
     * "Insufficient client scope" -- the token really is missing a permission, and
       logging in again is the fix.
-    * anything else, in practice a bare "Forbidden" -- the token is fine and the
-      account simply is not allowed to use this app. Logging in again changes
-      nothing, and telling the user to do it sends them off to debug the one thing
-      that is not broken.
+    * anything else, in practice a bare "Forbidden" -- Spotify has said nothing at
+      all. It is the same three-word answer for a retired endpoint, for an account
+      the app is not authorised for, and for a handful of rarer refusals. The honest
+      message therefore lists the likely causes and does not pick one: naming a
+      single culprit here sends the reader off to fix something that may not be
+      broken, which is exactly how this cost hours of debugging once already.
     """
     if "scope" in detail.lower():
         return (
@@ -280,23 +305,42 @@ def _forbidden_message(detail: str) -> str:
             "and the token that comes back will carry the missing permission."
         )
     return (
-        "Spotify refused the request (403). The access token is very likely fine -- "
-        "the account you logged in with is not authorised to use this app.\n"
+        "Spotify refused the request (403) without saying why. The access token is "
+        "very likely fine: a 403 this bare is almost never about the token itself, "
+        "and logging in again usually changes nothing.\n"
         "\n"
+        f"The request was: {method} {url}\n"
         f"Spotify said: {detail}\n"
         "\n"
-        "A Spotify app starts life in Development Mode, where only the accounts on "
-        "the app's own allowlist may call the API with it. An account that is not on "
-        "that list can still log in and receive a token with every permission "
-        "granted -- which is exactly why this looks like a missing permission -- but "
-        "every request that token makes comes back 403. Deleting the token cache and "
-        "logging in again will not change that.\n"
+        "Spotify gives the same bare answer to several different problems, so the "
+        "cause has to be worked out rather than read off. In order of how often each "
+        "one turns out to be it:\n"
         "\n"
-        "Add the account at https://developer.spotify.com/dashboard -> your app -> "
-        "Settings -> User Management, giving the name and the email address the "
-        "account is registered under. Development Mode allows up to 5 such users, "
-        "and the app's owner must have Spotify Premium.\n"
+        "1. The endpoint has been retired. Spotify's February 2026 Web API changes "
+        "replaced the per-entity library writes (PUT/DELETE /v1/me/albums and "
+        "/v1/me/tracks) with a single /v1/me/library endpoint, and the old ones now "
+        "answer 403 with no hint that deprecation is the reason. If the request "
+        "above is to a retired endpoint, that is the whole explanation -- nothing "
+        "about the account or the app needs changing, the call does. The list of "
+        "changes and the migration guide are at\n"
+        "https://developer.spotify.com/documentation/web-api/references/changes/february-2026\n"
+        "https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide\n"
         "\n"
-        "The two quota modes are explained at\n"
-        "https://developer.spotify.com/documentation/web-api/concepts/quota-modes"
+        "2. The account is not on the app's allowlist. A Spotify app starts life in "
+        "Development Mode, where only listed accounts may call the API with it. An "
+        "unlisted account can still log in and receive a token with every permission "
+        "granted -- which is why this can look like a missing permission -- but every "
+        "request it makes comes back 403. Add the account at "
+        "https://developer.spotify.com/dashboard -> your app -> Settings -> User "
+        "Management, giving the name and the email address the account is registered "
+        "under. Development Mode allows up to 5 such users, and the app's owner must "
+        "have Spotify Premium. The two quota modes are explained at\n"
+        "https://developer.spotify.com/documentation/web-api/concepts/quota-modes\n"
+        "\n"
+        "3. Something about this particular request is not allowed for this account "
+        "-- a market restriction, or an action a free account may not take.\n"
+        "\n"
+        "If the request above is one this tool makes often and used to work, start "
+        "with 1: an endpoint that was fine last month can be retired without the "
+        "error ever saying so."
     )

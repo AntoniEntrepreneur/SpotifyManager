@@ -159,12 +159,12 @@ def test_nothing_is_deleted_when_the_restore_file_cannot_be_written(tmp_path):
 
 
 def test_removals_go_out_in_the_largest_batches_the_api_permits(tmp_path):
-    resolution = resolution_of(120)
+    resolution = resolution_of(100)
     client = FakeClient()
     result = run(resolution, client, tmp_path)
 
-    assert [len(call) for call in client.calls] == [50, 50, 20]
-    assert ID_BATCH_LIMIT == 50
+    assert [len(call) for call in client.calls] == [40, 40, 20]
+    assert ID_BATCH_LIMIT == 40, "/v1/me/library refuses a 41st URI"
     assert client.deleted_ids == list(resolution.to_delete)
     assert [b.status for b in result.batches] == [SUCCEEDED] * 3
 
@@ -172,7 +172,7 @@ def test_removals_go_out_in_the_largest_batches_the_api_permits(tmp_path):
 def test_batches_never_exceed_the_limit_and_lose_nothing():
     ids = tuple(f"a{i}" for i in range(137))
     batches = list(batches_of(ids))
-    assert [len(b) for b in batches] == [50, 50, 37]
+    assert [len(b) for b in batches] == [40, 40, 40, 17]
     assert [i for batch in batches for i in batch] == list(ids)
 
 
@@ -197,7 +197,7 @@ def test_a_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed(tmp
     """The documented policy: batches are independent, so one failure does not
     abandon the work the reviewer already approved. The failed batch is reported as
     failed -- state unknown -- and every following batch is issued normally."""
-    resolution = resolution_of(150)  # three batches
+    resolution = resolution_of(120)  # three batches
     boom = RuntimeError("Spotify said no")
     # Calls 1-4 are the four attempts at batch 1; 5 and 6 are batches 2 and 3.
     client = FakeClient({1: boom, 2: boom, 3: boom, 4: boom})
@@ -208,8 +208,8 @@ def test_a_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed(tmp
     assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
     assert result.batches[0].attempts == 4
     assert "Spotify said no" in result.batches[0].error
-    assert result.failed_ids == resolution.to_delete[:50]
-    assert result.removed_ids == resolution.to_delete[50:]
+    assert result.failed_ids == resolution.to_delete[:40]
+    assert result.removed_ids == resolution.to_delete[40:]
     assert result.never_attempted_ids == ()
     assert not result.is_clean
     # Every album appears in exactly one classification, and all of them appear.
@@ -306,7 +306,7 @@ def test_an_interrupt_partway_leaves_the_later_batches_never_attempted(tmp_path)
     were never issued, so those albums are certainly still in the library, and the
     run must say so rather than lumping them in with the failure.
     """
-    resolution = resolution_of(200)  # four batches
+    resolution = resolution_of(160)  # four batches
     client = FakeClient({2: KeyboardInterrupt()})
 
     result = run(resolution, client, tmp_path)
@@ -317,9 +317,9 @@ def test_an_interrupt_partway_leaves_the_later_batches_never_attempted(tmp_path)
         NEVER_ATTEMPTED,
         NEVER_ATTEMPTED,
     ]
-    assert result.removed_ids == resolution.to_delete[:50]
-    assert result.failed_ids == resolution.to_delete[50:100]
-    assert result.never_attempted_ids == resolution.to_delete[100:]
+    assert result.removed_ids == resolution.to_delete[:40]
+    assert result.failed_ids == resolution.to_delete[40:80]
+    assert result.never_attempted_ids == resolution.to_delete[80:]
     assert result.interrupted.startswith("KeyboardInterrupt")
     # Nothing was issued after the interrupt.
     assert len(client.calls) == 2
@@ -356,7 +356,7 @@ class _FakeHttp:
         self.requests: list[tuple[str, str, object]] = []
 
     def request(self, method, url, params=None, json=None, headers=None, timeout=None):
-        self.requests.append((method, url, json))
+        self.requests.append((method, url, params, json))
         return self._statuses.pop(0)
 
 
@@ -392,7 +392,14 @@ def test_a_throttling_response_mid_deletion_waits_as_instructed_then_continues(t
     assert session.stats.throttled == 1
     # The retry is the session's, so the batch itself needed only one attempt.
     assert result.batches[0].attempts == 1
-    assert [len(payload["ids"]) for _, _, payload in session._session.requests] == [50, 50, 10]
+    # Every write went to the one library endpoint, as URIs in the query string.
+    assert [(m, u) for m, u, _p, _j in session._session.requests] == [
+        ("DELETE", "https://api.spotify.com/v1/me/library")
+    ] * 3
+    assert [j for _m, _u, _p, j in session._session.requests] == [None] * 3
+    sent = [p["uris"].split(",") for _m, _u, p, _j in session._session.requests]
+    assert [len(uris) for uris in sent] == [40, 40, 20]
+    assert all(uri.startswith("spotify:album:") for batch in sent for uri in batch)
 
 
 # -- approving nothing -------------------------------------------------------
@@ -446,12 +453,12 @@ def test_an_empty_result_answers_every_question_without_pretending(tmp_path):
 
 
 def test_restoring_saves_every_album_in_the_largest_batches_the_api_permits():
-    ids = tuple(f"alb{i:04d}" for i in range(120))
+    ids = tuple(f"alb{i:04d}" for i in range(100))
     client = FakeClient()
 
     result = restore(ids, client, sleep=lambda seconds: None)
 
-    assert [len(call) for call in client.calls] == [50, 50, 20]
+    assert [len(call) for call in client.calls] == [40, 40, 20]
     assert client.saved_ids == list(ids)
     assert [b.status for b in result.batches] == [SUCCEEDED] * 3
     assert result.removed_ids == ids
@@ -472,20 +479,20 @@ def test_restoring_already_saved_albums_is_harmless_not_an_error():
 
 
 def test_a_restore_batch_that_fails_every_retry_is_failed_and_the_rest_still_proceed():
-    ids = tuple(f"alb{i:04d}" for i in range(150))  # three batches
+    ids = tuple(f"alb{i:04d}" for i in range(120))  # three batches
     boom = RuntimeError("Spotify said no")
     client = FakeClient({1: boom, 2: boom, 3: boom, 4: boom})
 
     result = restore(ids, client, sleep=lambda seconds: None)
 
     assert [b.status for b in result.batches] == [FAILED, SUCCEEDED, SUCCEEDED]
-    assert result.failed_ids == ids[:50]
-    assert result.removed_ids == ids[50:]
+    assert result.failed_ids == ids[:40]
+    assert result.removed_ids == ids[40:]
     assert not result.is_clean
 
 
 def test_a_restore_run_is_interrupted_like_a_deletion_run():
-    ids = tuple(f"alb{i:04d}" for i in range(200))  # four batches
+    ids = tuple(f"alb{i:04d}" for i in range(160))  # four batches
     client = FakeClient({2: KeyboardInterrupt()})
 
     result = restore(ids, client, sleep=lambda seconds: None)
