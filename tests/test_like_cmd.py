@@ -288,6 +288,27 @@ def test_format_results_distinguishes_never_attempted_from_failed():
     assert "Re-run the command to finish" in text
 
 
+def test_format_results_reports_a_refused_batch_as_certainly_not_liked():
+    """Same split `dedupe` makes: every attempt answered 4xx means Spotify refused
+    to act, so those tracks certainly were not liked. Saying "may or may not" there
+    would discard the one thing a failed run knows for sure."""
+    result = LikeResult(
+        batches=(
+            BatchOutcome(
+                number=1, ids=("r1",), status=FAILED, attempts=4,
+                error="ApiError: 403", error_status=403,
+            ),
+            BatchOutcome(number=2, ids=("u1",), status=FAILED, attempts=4, error="Timeout"),
+        ),
+        requested_ids=("r1", "u1"),
+    )
+    text = like_cmd.format_results(result)
+
+    refused, unknown = text.index("Refused by Spotify"), text.index("\nFailed (")
+    assert refused < text.index("r1") < unknown < text.index("u1")
+    assert "those tracks were not liked" in text
+
+
 def test_format_results_does_not_print_ten_thousand_ids():
     ids = tuple(f"t{i}" for i in range(500))
     result = LikeResult(

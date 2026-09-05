@@ -100,7 +100,7 @@ def test_nothing_is_liked_when_the_run_record_cannot_be_written(tmp_path):
 def test_the_record_lists_what_the_run_set_out_to_do_not_what_worked(tmp_path):
     """A superset is harmless -- unliking an unliked track is a no-op. A subset is not."""
     client = FakeClient(fail_on={2})
-    like(_ids(120), client, likes_dir=tmp_path, now=NOW, batch_size=50, sleep=lambda _s: None)
+    like(_ids(120), client, likes_dir=tmp_path, now=NOW, batch_size=40, sleep=lambda _s: None)
 
     document = json.loads(_only_record(tmp_path).read_text(encoding="utf-8"))
     assert tuple(document["track_ids"]) == _ids(120)

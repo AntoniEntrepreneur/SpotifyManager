@@ -12,12 +12,17 @@ malformed record produces a clear message and touches nothing. Past that point t
 ids go out with the same batching, retries and honest three-way classification every
 other write in this tool uses.
 
-Two things are deliberately not here. **No record file of its own** -- the file being
-undone is already that record, and it is read rather than consumed, because re-liking
-is how this run is itself undone. **No confirmation prompt** -- unlike
-`like-album-tracks`, which decides for itself what to touch, this command was handed
-an explicit list by an explicit path; the user has already named exactly what they
-mean.
+**It writes no record of its own.** The file being undone is already that record, and
+it is read rather than consumed, because re-liking is how this run is itself undone.
+
+**It asks before it removes anything, exactly as `like-album-tracks` asks.** The path
+is an explicit choice, but the record's *contents* are not: they are whatever the
+planner decided, from a Liked Songs snapshot that may have been hours stale. A track
+the user had liked by hand can therefore sit in a record as a like the run never
+actually made -- the PUT was a no-op -- and un-liking it here would destroy a like
+this tool did not create, with a date nothing can restore. The additive direction
+demands a typed yes; the destructive one cannot demand less. `--dry-run` shows what
+the record names without touching anything.
 
 What it cannot undo is chronology. Liked Songs is ordered by when each track was
 liked, and un-liking then re-liking a track stamps it with the moment of the re-like.
@@ -34,6 +39,7 @@ from ..config import Config, load_config
 from ..errors import SpotifyManagerError
 from ..likes.execute import UnlikeResult, unlike
 from ..likes.record import LikeRecord, RecordDocumentError
+from .confirm import confirmed as ask
 from .library import build_client, liked_tracks_cache
 
 
@@ -47,6 +53,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         metavar="RUN_RECORD",
         help="path to a run record written by `like-album-tracks`",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt (required when stdin is not a terminal)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what the record names and exit without unliking anything",
     )
     parser.add_argument(
         "--rate",
@@ -80,7 +96,18 @@ def run(args: argparse.Namespace) -> int:
         print(f"{args.run_record} lists no tracks. Nothing was unliked.")
         return 0
 
-    print(f"Unliking {len(record.track_ids)} track(s) from {args.run_record}.")
+    count = len(record.track_ids)
+    when = record.created_at or "an unrecorded time"
+    print(f"{args.run_record} names {count} track(s), liked at {when}.")
+    if args.dry_run:
+        print("Dry run: nothing was unliked.")
+        return 0
+    if not confirmed(count, assume_yes=args.yes):
+        print("Nothing was unliked.")
+        return 1
+
+    print()
+    print(f"Unliking {count} track(s) from {args.run_record}.")
     # Built outside the try on purpose: a client that cannot be built has issued no
     # request, so Liked Songs is still exactly what the snapshot says it is, and the
     # `finally` below must not throw it away for nothing.
@@ -103,6 +130,20 @@ def run(args: argparse.Namespace) -> int:
     # A run that did not finish did not succeed, and should not tell a shell script
     # that it did.
     return 0 if result.is_clean else 1
+
+
+def confirmed(count: int, *, assume_yes: bool, stream=None) -> bool:
+    """Whether the user has actually agreed to remove `count` likes.
+
+    The rules -- and the reasons for them -- are `commands.confirm`'s, shared with
+    `like-album-tracks`; this only supplies the wording.
+    """
+    return ask(
+        f"Unlike {count} tracks?",
+        refusal="Refusing to unlike tracks without confirmation: stdin is not a terminal.",
+        assume_yes=assume_yes,
+        stream=stream,
+    )
 
 
 def load_record_file(path: Path) -> LikeRecord:
@@ -153,9 +194,14 @@ def format_result(result: UnlikeResult) -> str:
 
     lines += ["", "THIS RUN DID NOT FINISH. Some tracks may not have been unliked."]
     lines += _listing(
+        "Refused by Spotify",
+        result.rejected_ids,
+        "Spotify rejected these requests outright; those tracks are still liked",
+    )
+    lines += _listing(
         "Failed",
-        result.failed_ids,
-        "these requests were sent and errored; those tracks may or may not be liked",
+        result.unknown_ids,
+        "these requests were sent and errored; those tracks may or may not still be liked",
     )
     lines += _listing(
         "Never attempted",

@@ -12,6 +12,7 @@ checked without a network.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 
 import pytest
@@ -57,8 +58,51 @@ def test_a_well_formed_run_record_parses_to_its_track_ids(tmp_path):
     assert unlike_cmd.load_record_file(path).track_ids == ("t1", "t2")
 
 
-def _args(path) -> argparse.Namespace:
-    return argparse.Namespace(run_record=path, verbose=False, rate=None)
+def _args(path, *, yes=True, dry_run=False) -> argparse.Namespace:
+    """Defaults to `--yes`, so the tests that are not about the prompt do not have to
+    answer one. The prompt has its own tests below."""
+    return argparse.Namespace(
+        run_record=path, verbose=False, rate=None, yes=yes, dry_run=dry_run
+    )
+
+
+class _Tty(io.StringIO):
+    def __init__(self, text: str = "", tty: bool = True):
+        super().__init__(text)
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+# -- the confirmation --------------------------------------------------------
+
+# The rules live in `commands.confirm` and are pinned in full against
+# `like-album-tracks`. What is checked here is that the destructive direction is
+# actually behind them, and that its wording names the destructive verb.
+
+
+def test_yes_at_the_prompt_approves():
+    assert unlike_cmd.confirmed(10, assume_yes=False, stream=_Tty("yes\n")) is True
+
+
+@pytest.mark.parametrize("answer", ["no\n", "\n", "y\n", ""])
+def test_anything_but_yes_does_not_approve(answer):
+    assert unlike_cmd.confirmed(10, assume_yes=False, stream=_Tty(answer)) is False
+
+
+def test_the_prompt_says_unlike_not_like(capsys):
+    """A user typing yes to the wrong question is the accident the wording prevents."""
+    unlike_cmd.confirmed(9473, assume_yes=False, stream=_Tty("no\n"))
+    asked = capsys.readouterr().out
+    assert "Unlike 9473 tracks?" in asked
+
+
+def test_a_non_terminal_stdin_refuses_rather_than_proceeding(capsys):
+    """A redirect must never be able to approve destroying ten thousand likes."""
+    assert unlike_cmd.confirmed(9473, assume_yes=False, stream=_Tty("", tty=False)) is False
+    err = capsys.readouterr().err
+    assert "--yes" in err and "unlike" in err
 
 
 class FakeCache:
@@ -248,6 +292,72 @@ def test_format_result_names_failures_and_never_attempted():
     assert "f1" in text
     assert "n1" in text
     assert "boom" in text
+
+
+def test_a_declined_prompt_unlikes_nothing_and_exits_nonzero(tmp_path, monkeypatch, cache):
+    """The gate that finding #1 asked for: the record's contents are the planner's
+    choice, not the user's, so removing likes has to be agreed to."""
+    path = tmp_path / "liked.json"
+    path.write_text(json.dumps({"track_ids": ["t1"]}), encoding="utf-8")
+
+    monkeypatch.setattr(unlike_cmd, "load_config", lambda: object())
+    monkeypatch.setattr(unlike_cmd, "build_client", lambda *a, **k: pytest.fail("not agreed"))
+    monkeypatch.setattr(unlike_cmd, "unlike", lambda *a, **k: pytest.fail("not agreed"))
+    monkeypatch.setattr(unlike_cmd, "confirmed", lambda *a, **k: False)
+
+    assert unlike_cmd.run(_args(path, yes=False)) == 1
+    assert not cache.discarded, "nothing was sent, so the snapshot is still right"
+
+
+def test_a_dry_run_touches_nothing_and_exits_zero(tmp_path, monkeypatch, cache, capsys):
+    path = tmp_path / "liked.json"
+    path.write_text(json.dumps({"track_ids": ["t1", "t2"]}), encoding="utf-8")
+
+    monkeypatch.setattr(unlike_cmd, "load_config", lambda: object())
+    monkeypatch.setattr(unlike_cmd, "build_client", lambda *a, **k: pytest.fail("dry run"))
+    monkeypatch.setattr(unlike_cmd, "unlike", lambda *a, **k: pytest.fail("dry run"))
+    monkeypatch.setattr(unlike_cmd, "confirmed", lambda *a, **k: pytest.fail("dry run"))
+
+    assert unlike_cmd.run(_args(path, yes=False, dry_run=True)) == 0
+    assert "2 track(s)" in capsys.readouterr().out
+    assert not cache.discarded
+
+
+def test_a_batch_spotify_refused_is_reported_as_still_liked_not_as_unknown():
+    """`batching` already knows the difference: every attempt answered 4xx means
+    Spotify refused to act, so those tracks are certainly still liked. Collapsing
+    that into "may or may not" would throw away the one certainty in a failed run --
+    and a missing `user-library-modify` scope 403s every batch, which is exactly the
+    case where the user most needs to be told nothing happened."""
+    from spotify_manager.batching import FAILED, BatchOutcome
+
+    result = UnlikeResult(
+        batches=(
+            BatchOutcome(
+                number=1, ids=("r1",), status=FAILED, error="ApiError: 403", error_status=403
+            ),
+            BatchOutcome(number=2, ids=("u1",), status=FAILED, error="Timeout"),
+        ),
+        requested_ids=("r1", "u1"),
+    )
+    text = unlike_cmd.format_result(result)
+
+    refused, unknown = text.index("Refused by Spotify"), text.index("\nFailed (")
+    assert text.index("r1") > refused and text.index("r1") < unknown
+    assert text.index("u1") > unknown
+    assert "those tracks are still liked" in text
+    assert "may or may not still be liked" in text
+
+
+def test_a_run_with_no_refusals_prints_no_refused_section():
+    """The section exists to carry a certainty; with nothing certain it is noise."""
+    from spotify_manager.batching import FAILED, BatchOutcome
+
+    result = UnlikeResult(
+        batches=(BatchOutcome(number=1, ids=("u1",), status=FAILED, error="Timeout"),),
+        requested_ids=("u1",),
+    )
+    assert "Refused by Spotify" not in unlike_cmd.format_result(result)
 
 
 def test_format_result_does_not_print_ten_thousand_ids():

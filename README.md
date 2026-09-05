@@ -51,7 +51,7 @@ pip install -e ".[dev]"
 spotify-manager dedupe [--refresh] [--no-browser] [--port PORT] [--clear-decisions] [--verbose]
 spotify-manager like-album-tracks [--refresh] [--yes] [--dry-run] [--rate PER_SECOND] [--verbose]
 spotify-manager restore RESTORE_FILE [--verbose]
-spotify-manager unlike-tracks RUN_RECORD [--rate PER_SECOND] [--verbose]
+spotify-manager unlike-tracks RUN_RECORD [--yes] [--dry-run] [--rate PER_SECOND] [--verbose]
 spotify-manager redact-snapshot [--source PATH] [--output PATH]
 ```
 
@@ -142,6 +142,15 @@ missing or malformed run record produces a clear message and unlikes nothing.
 ```
 spotify-manager unlike-tracks .spotifymanager/likes/liked-2026-09-05T14-30-00.json
 ```
+
+The count is shown and nothing is removed until you type `yes`; `--dry-run` shows what
+the record names and stops there. The prompt is not ceremony. The path is your choice,
+but the record's *contents* are the planner's, taken from a Liked Songs snapshot that
+may have been hours stale — so a track you had already liked by hand can sit in a
+record as a like the run never actually made, its PUT a no-op. Un-liking that one
+destroys a like this tool did not create. As with `like-album-tracks`, `--yes` is
+required when stdin is not a terminal, so a redirect cannot approve this by accident
+and a CI job cannot hang on it.
 
 The record names what the run *set out* to like, which may be more than it managed to
 like; that is harmless, because removing a like that is not there is a no-op on
