@@ -49,6 +49,16 @@ class Config:
         return self.state_dir / "library_snapshot.json"
 
     @property
+    def restores_dir(self) -> Path:
+        """Where every run that deletes something writes its restore file first.
+
+        Separate from the reports directory on purpose: a report is a record you may
+        delete when the disk fills up, and a restore file is the only way back from
+        an approved mistake. They should not be confusable.
+        """
+        return self.state_dir / "restores"
+
+    @property
     def reports_dir(self) -> Path:
         """Where every run archives its rendered report. Local state, gitignored."""
         return self.state_dir / "reports"

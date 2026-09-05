@@ -44,6 +44,11 @@ DEFAULT_PORT = 8765
 #: The route the report posts its decisions to.
 APPROVE_PATH = "/approve"
 
+#: Where the results view lives once the decisions have been applied. The approval
+#: page sends the browser here from the POST response, so the reviewer ends up
+#: looking at the outcome in the tab they submitted from.
+RESULTS_PATH = "/results"
+
 #: How often the waiting thread wakes to check for an interrupt.
 _POLL_SECONDS = 0.2
 
@@ -74,11 +79,14 @@ class ApprovalServer:
         html: str,
         *,
         interpret: Callable[[Any], Any] = lambda raw: raw,
+        render_results: Callable[[Any], str] | None = None,
         port: int = DEFAULT_PORT,
         host: str = HOST,
     ) -> None:
         self._html = html.encode("utf-8")
         self._interpret = interpret
+        self._render_results = render_results
+        self._results_html: bytes | None = None
         self.host = host
         self.port = port
         self._event = threading.Event()
@@ -156,6 +164,20 @@ class ApprovalServer:
     def has_decision(self) -> bool:
         return self._event.is_set()
 
+    @property
+    def results_html(self) -> str | None:
+        """The results view, once there is one. None until the decisions are applied."""
+        return None if self._results_html is None else self._results_html.decode("utf-8")
+
+    def _page(self) -> bytes:
+        """What `GET /` serves: the plan until the run has applied it, then the results.
+
+        After applying, refreshing the tab must not show the approval page again --
+        that page describes a decision that has already been carried out, and its
+        button would only earn a 409. The results are the page now.
+        """
+        return self._html if self._results_html is None else self._results_html
+
 
 def _make_handler(server: ApprovalServer) -> type[BaseHTTPRequestHandler]:
     class ApprovalHandler(BaseHTTPRequestHandler):
@@ -172,7 +194,18 @@ def _make_handler(server: ApprovalServer) -> type[BaseHTTPRequestHandler]:
             if path in ("/", "/index.html"):
                 # Served again on every request, so reopening a closed tab works and
                 # a refresh after submitting still shows the page rather than hanging.
-                self._respond(HTTPStatus.OK, "text/html; charset=utf-8", server._html)
+                self._respond(HTTPStatus.OK, "text/html; charset=utf-8", server._page())
+            elif path == RESULTS_PATH:
+                if server._results_html is None:
+                    self._respond(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"No results yet: nothing has been applied.\n",
+                    )
+                else:
+                    self._respond(
+                        HTTPStatus.OK, "text/html; charset=utf-8", server._results_html
+                    )
             elif path == "/favicon.ico":
                 self._respond(HTTPStatus.NO_CONTENT, "text/plain", b"")
             else:
@@ -210,7 +243,23 @@ def _make_handler(server: ApprovalServer) -> type[BaseHTTPRequestHandler]:
                 # and keep waiting -- the reviewer can reload and submit again.
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
+            # `interpret` is where the run applies the decisions, so by this line the
+            # deletions have already happened and `decision` describes what happened.
+            # Rendering the results before unblocking the main thread means the page
+            # the reviewer is sent to is guaranteed to be there when they arrive.
+            if server._render_results is not None:
+                server._results_html = server._render_results(decision).encode("utf-8")
             server._submit(decision)
+            if server._results_html is not None:
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "status": "applied",
+                        "results_url": RESULTS_PATH,
+                        "message": "Decisions applied. Showing the results.",
+                    },
+                )
+                return
             self._json(
                 HTTPStatus.OK,
                 {
@@ -221,8 +270,6 @@ def _make_handler(server: ApprovalServer) -> type[BaseHTTPRequestHandler]:
                     ),
                 },
             )
-            # Ticket #6 hooks in here: instead of ending at "received", the run's
-            # execution result becomes a results view served from this same server.
 
         # -- plumbing -------------------------------------------------------
 

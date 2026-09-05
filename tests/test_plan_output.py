@@ -27,13 +27,14 @@ def real_plan():
 
 FORBIDDEN_IMPORTS = ("infra", "requests", "spotipy", "urllib", "pathlib", "time", "datetime")
 
-#: `ledger.py` is the one module in this package that owns a file, and it is the
-#: exception on purpose: the judgements the user has already made have to live
-#: somewhere. It is excluded from the import check below and constrained instead by
-#: the two tests that follow -- nothing in the pure path may import it, so the pairs
-#: it stores can only reach the planner as a plain argument passed by the command
-#: layer.
-IO_OWNING_MODULES = ("ledger.py",)
+#: The two modules in this package that are deliberately not pure, named one by one
+#: so that adding a third to a package whose whole value is being pure has to be an
+#: explicit decision. `ledger.py` owns a file because the judgements the user has
+#: already made have to live somewhere; `execute.py` writes the restore file and
+#: issues the deletions, which cannot be done without a clock, a path and the API.
+#: Nothing in the pure path may import either, so the pairs the ledger stores can
+#: only reach the planner as a plain argument passed by the command layer.
+IO_OWNING_MODULES = ("ledger.py", "execute.py")
 
 
 def _imports_of(module: str) -> set[str]:
@@ -72,7 +73,7 @@ def test_nothing_in_the_pure_path_reads_the_ledger_file(module):
         assert "ledger" not in name.split("."), f"{module} imports {name!r}"
 
 
-def test_the_ledger_is_the_only_module_in_the_package_that_owns_a_file():
+def test_only_the_named_modules_in_the_package_own_a_file():
     """A new I/O-owning module must be a deliberate decision, not a slow drift."""
     io_owning = {
         p.name

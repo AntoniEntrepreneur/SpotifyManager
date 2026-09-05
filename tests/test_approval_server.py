@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from spotify_manager.dedupe.execute import Applied, execute, restore_command_for
 from spotify_manager.dedupe.models import DedupePlan, snapshot_from_raw
 from spotify_manager.dedupe.planner import plan as build_plan
 from spotify_manager.dedupe.resolve import (
@@ -29,9 +30,10 @@ from spotify_manager.dedupe.resolve import (
     approve_plan_unmodified,
     resolve_decisions,
 )
-from spotify_manager.report import render_plan_html
+from spotify_manager.report import render_plan_html, render_results_html
 from spotify_manager.report.server import (
     APPROVE_PATH,
+    RESULTS_PATH,
     ApprovalServer,
     PortUnavailableError,
 )
@@ -228,6 +230,140 @@ def test_a_busy_port_is_a_sentence_naming_the_port_and_the_flag(served):
     message = str(raised.value)
     assert str(server.port) in message
     assert "--port" in message
+
+
+# --------------------------------------------------------------------------
+# The results view re-rendering in place, driven end to end against a stub
+# --------------------------------------------------------------------------
+
+
+class _StubClient:
+    """Stands in for `SpotifyClient.delete_albums`: always succeeds, records ids.
+
+    This is not the real Spotify client and never touches the network or the real
+    account -- exactly the point: ticket #6 must be verified without ever running
+    a deletion against anything real.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def delete_albums(self, ids: list[str]) -> None:
+        self.calls.append(list(ids))
+
+
+@pytest.fixture
+def served_for_execution(real_plan: DedupePlan, tmp_path: Path):
+    """A running server whose POST actually applies the decisions, against a stub
+    client and a scratch restores directory -- never the real account.
+
+    Wired exactly the way `dedupe_cmd.review` wires it: `interpret` resolves and
+    executes on the request thread, and `render_results` renders the same
+    `Applied` it produced. That is the wiring this test exists to prove.
+    """
+    html = render_plan_html(real_plan, approve_url=APPROVE_PATH)
+    client = _StubClient()
+
+    def interpret(raw: Any) -> Applied:
+        resolution = resolve_decisions(real_plan, ApprovalPayload.from_raw(raw))
+        result = execute(resolution, client, restores_dir=tmp_path / "restores")
+        return Applied(resolution=resolution, result=result)
+
+    def results_page(applied: Applied) -> str:
+        return render_results_html(
+            applied.result,
+            applied.resolution,
+            restore_command=restore_command_for(applied.result.restore_path),
+        )
+
+    server = ApprovalServer(html, interpret=interpret, render_results=results_page, port=0).start()
+    waiter = _Waiter(server)
+    try:
+        yield server, waiter, client
+    finally:
+        server.stop()
+
+
+def test_the_post_response_carries_the_results_url_back_to_the_submitting_tab(
+    served_for_execution, real_plan
+):
+    server, waiter, client = served_for_execution
+
+    status, body = post(
+        server.url.rstrip("/") + APPROVE_PATH, payload_of(approve_plan_unmodified(real_plan))
+    )
+
+    assert status == 200
+    assert body["status"] == "applied"
+    assert body["results_url"] == RESULTS_PATH
+    waiter.resolution()
+    # The stub client actually received the deletion calls -- proving the results
+    # view reflects a run that really executed, not just a resolved plan.
+    assert client.calls, "execute() never reached the stub client"
+
+
+def test_get_results_after_applying_serves_the_rendered_results_page(
+    served_for_execution, real_plan
+):
+    server, waiter, _ = served_for_execution
+    post(server.url.rstrip("/") + APPROVE_PATH, payload_of(approve_plan_unmodified(real_plan)))
+    waiter.resolution()
+
+    status, html = get(server.url.rstrip("/") + RESULTS_PATH)
+    assert status == 200
+    assert "Dedupe results" in html
+
+
+def test_get_root_after_applying_serves_the_results_page_not_the_plan_again(
+    served_for_execution, real_plan
+):
+    """Refreshing the tab after applying must land on the outcome, never the
+    approval page again -- that page's button would only earn a 409 now."""
+    server, waiter, _ = served_for_execution
+    post(server.url.rstrip("/") + APPROVE_PATH, payload_of(approve_plan_unmodified(real_plan)))
+    waiter.resolution()
+
+    status, html = get(server.url)
+    assert status == 200
+    assert "Dedupe results" in html
+    assert 'id="approve"' not in html
+
+
+def test_approving_nothing_still_produces_a_results_view_over_the_real_server(
+    served_for_execution, real_plan
+):
+    """The full stack, not just the pure functions: skipping every group posts a
+    decision that removes nothing, and the server still hands back a results page."""
+    server, waiter, client = served_for_execution
+    decisions = {
+        "groups": {str(index): {"action": "skip", "keep": []} for index in range(len(real_plan.groups))}
+    }
+
+    status, body = post(server.url.rstrip("/") + APPROVE_PATH, decisions)
+
+    assert status == 200
+    assert body["results_url"] == RESULTS_PATH
+    waiter.resolution()
+    assert client.calls == [], "nothing approved means nothing sent to the client"
+
+    status, html = get(server.url.rstrip("/") + RESULTS_PATH)
+    assert status == 200
+    assert "Nothing was removed." in html
+
+
+def test_a_400_leaves_the_server_waiting_even_with_execution_wired_up(served_for_execution):
+    """The #5 behaviour must survive #6's change: a payload that cannot be
+    interpreted must never reach `execute`, and the run must keep waiting."""
+    server, waiter, client = served_for_execution
+
+    status, body = post(
+        server.url.rstrip("/") + APPROVE_PATH,
+        {"groups": {"99999": {"action": "resolve", "keep": []}}},
+    )
+
+    assert status == 400
+    assert waiter.still_waiting()
+    assert client.calls == [], "a rejected payload must never reach execute()"
 
 
 def _local_ip() -> str:

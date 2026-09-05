@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from spotify_manager.dedupe.execute import BatchOutcome, ExecutionResult
 from spotify_manager.dedupe.models import (
     AlbumJudgement,
     Artist,
@@ -26,7 +27,8 @@ from spotify_manager.dedupe.models import (
     snapshot_from_raw,
 )
 from spotify_manager.dedupe.planner import plan
-from spotify_manager.report import render_plan_html
+from spotify_manager.dedupe.resolve import Resolution, RestoreAlbum, SkippedGroup
+from spotify_manager.report import render_plan_html, render_results_html
 
 FIXTURE = Path(__file__).parent / "fixtures" / "library_snapshot.redacted.json"
 RENDER_MODULE = Path(__file__).parents[1] / "src" / "spotify_manager" / "report" / "render.py"
@@ -254,3 +256,196 @@ def test_an_empty_plan_still_renders_an_approvable_document():
     assert "No duplicate editions found." in html
     assert 'id="approve"' in html
     assert html.strip().endswith("</html>")
+
+
+# --------------------------------------------------------------------------
+# The results view: what actually happened, after decisions were carried out
+# --------------------------------------------------------------------------
+
+RESTORE_COMMAND = "spotify-manager restore /tmp/restores/restore-2026-09-03T14-30-00.json"
+
+
+def _restore_album(index: int) -> RestoreAlbum:
+    return RestoreAlbum(
+        id=f"alb{index:04d}",
+        name=f"Album {index} (Deluxe Edition)",
+        artists="Some Artist",
+        release_date="2019-09-27",
+        total_tracks=12,
+    )
+
+
+def _resolution(count: int, *, kept: int = 0, skipped_size: int = 0) -> Resolution:
+    albums = tuple(_restore_album(i) for i in range(count))
+    skipped = (
+        (SkippedGroup(key=GroupKey(normalized_title="x", primary_artist_id="a", album_type="album"),
+                      album_ids=tuple(f"skip{i}" for i in range(skipped_size))),)
+        if skipped_size
+        else ()
+    )
+    return Resolution(
+        to_delete=tuple(a.id for a in albums),
+        kept=tuple(f"keep{i}" for i in range(kept)),
+        skipped_groups=skipped,
+        restore_albums=albums,
+    )
+
+
+def test_a_clean_result_states_removed_count_and_no_failures():
+    resolution = _resolution(3, kept=2)
+    result = ExecutionResult(
+        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert '<span class="n">3</span><span class="l">removed</span>' in html
+    assert '<span class="n">0</span><span class="l">failed</span>' in html
+    assert '<span class="n">0</span><span class="l">never attempted</span>' in html
+    assert "All 3 approved albums removed." in html
+    # No failure or never-attempted panel is rendered at all for a clean run.
+    assert "state unknown" not in html
+    assert "never attempted &mdash; still saved" not in html
+    assert html.strip().endswith("</html>")
+
+
+def test_a_run_that_approved_nothing_still_renders_a_results_view():
+    resolution = Resolution(kept=("a", "b"))
+    result = ExecutionResult(requested_ids=(), created_at="2026-09-03T14:30:00+00:00")
+
+    html = render_results_html(result, resolution, restore_command="")
+
+    assert "Nothing was removed." in html
+    assert "No restore file" in html
+    assert '<span class="n">0</span><span class="l">approved for removal</span>' in html
+    assert html.strip().endswith("</html>")
+
+
+def test_a_partial_failure_states_every_count_exactly_and_never_summarises_it_away():
+    resolution = _resolution(6)
+    result = ExecutionResult(
+        batches=(
+            BatchOutcome(number=1, album_ids=resolution.to_delete[:2], status="succeeded", attempts=1),
+            BatchOutcome(
+                number=2,
+                album_ids=resolution.to_delete[2:4],
+                status="failed",
+                attempts=4,
+                error="RuntimeError: Spotify said no",
+            ),
+            BatchOutcome(number=3, album_ids=resolution.to_delete[4:], status="never_attempted"),
+        ),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+        interrupted="KeyboardInterrupt",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "did not finish" in html
+    # The tab title and the banner both state the true, unfinished count.
+    assert "INCOMPLETE" in html
+    assert '<span class="n">2</span><span class="l">removed</span>' in html
+    assert '<span class="n">2</span><span class="l">failed</span>' in html
+    assert '<span class="n">2</span><span class="l">never attempted</span>' in html
+    # Every failed and never-attempted album is actually named, not just counted.
+    for album_id in resolution.to_delete[2:4]:
+        assert album_id in html.split("state unknown")[1].split("still saved")[0]
+    for album_id in resolution.to_delete[4:]:
+        assert album_id in html
+    assert "Spotify said no" in html
+    assert "KeyboardInterrupt" in html
+    assert html.strip().endswith("</html>")
+
+
+def test_the_results_page_names_the_restore_file_and_the_undo_command():
+    resolution = _resolution(2)
+    result = ExecutionResult(
+        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "/tmp/restores/restore-2026-09-03T14-30-00.json" in html
+    assert RESTORE_COMMAND in html
+
+
+def test_the_results_page_is_self_contained_except_cover_art():
+    resolution = _resolution(2)
+    result = ExecutionResult(
+        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "<script src" not in html
+    assert "<link " not in html
+    assert "@import" not in html
+    hosts = set(re.findall(r"https?://([^/\"'\s]+)", html))
+    assert hosts in (set(), {"i.scdn.co"}), hosts
+
+
+def test_the_results_page_carries_no_approval_controls():
+    """A results page describes a decision already carried out; it must not be able
+    to submit anything -- there is no plan left to submit it against."""
+    resolution = _resolution(2)
+    result = ExecutionResult(
+        batches=(BatchOutcome(number=1, album_ids=resolution.to_delete, status="succeeded", attempts=1),),
+        requested_ids=resolution.to_delete,
+        restore_path=Path("/tmp/restores/restore-2026-09-03T14-30-00.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert "keep-box" not in html
+    assert "skip-box" not in html
+    assert "fetch(" not in html
+    assert "/approve" not in html
+    assert "<form" not in html
+    assert "<button" not in html
+
+
+def test_the_results_page_escapes_hostile_album_names():
+    resolution = Resolution(
+        to_delete=("hostile1",),
+        restore_albums=(
+            RestoreAlbum(
+                id="hostile1",
+                name=HOSTILE_TITLE,
+                artists='Sam & "The" <Band>',
+                release_date="2019-03-04",
+                total_tracks=10,
+            ),
+        ),
+    )
+    result = ExecutionResult(
+        batches=(BatchOutcome(number=1, album_ids=("hostile1",), status="failed", attempts=4, error="boom"),),
+        requested_ids=("hostile1",),
+        restore_path=Path("/tmp/restores/restore-x.json"),
+        created_at="2026-09-03T14:30:00+00:00",
+    )
+    html = render_results_html(result, resolution, restore_command=RESTORE_COMMAND)
+
+    assert HOSTILE_TITLE not in html
+    assert "<script>alert" not in html
+    assert "Sam &amp; &quot;The&quot; &lt;Band&gt;" in html
+
+
+def test_rendering_results_cannot_reach_the_filesystem_the_network_or_the_clock():
+    """Same purity guarantee as the plan renderer -- both live in this module."""
+    tree = ast.parse(RENDER_MODULE.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    forbidden = ("pathlib", "os", "time", "datetime", "requests", "urllib", "webbrowser")
+    for name in imported:
+        assert name.split(".")[0] not in forbidden, f"render.py imports {name!r}"

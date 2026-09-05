@@ -9,13 +9,21 @@ half -- it puts that string on a loopback port and waits for a decision to come 
 
 from __future__ import annotations
 
-from .render import render_plan_html
-from .server import APPROVE_PATH, DEFAULT_PORT, ApprovalServer, PortUnavailableError
+from .render import render_plan_html, render_results_html
+from .server import (
+    APPROVE_PATH,
+    DEFAULT_PORT,
+    RESULTS_PATH,
+    ApprovalServer,
+    PortUnavailableError,
+)
 
 __all__ = [
     "APPROVE_PATH",
     "DEFAULT_PORT",
     "ApprovalServer",
     "PortUnavailableError",
+    "RESULTS_PATH",
     "render_plan_html",
+    "render_results_html",
 ]
