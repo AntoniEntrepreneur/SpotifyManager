@@ -169,6 +169,7 @@ class Applied:
 
     resolution: Resolution
     result: ExecutionResult
+    recorded_pairs: int = 0
 
 
 def batches_of(ids: tuple[str, ...], size: int = ID_BATCH_LIMIT) -> Iterator[tuple[str, ...]]:

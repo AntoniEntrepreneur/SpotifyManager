@@ -27,19 +27,17 @@ def real_plan():
 
 FORBIDDEN_IMPORTS = ("infra", "requests", "spotipy", "urllib", "pathlib", "time", "datetime")
 
-#: `execute.py` is the one module in this package that is deliberately impure: it
-#: writes the restore file and issues the deletions, which is exactly the work that
-#: cannot be done without a clock, a path and the API. It is exempt by name rather
-#: than by a looser rule, so that adding a *second* impure module to a package whose
-#: whole value is being pure has to be an explicit decision.
-IMPURE_BY_DESIGN = ("execute.py",)
+#: The two modules in this package that are deliberately not pure, named one by one
+#: so that adding a third to a package whose whole value is being pure has to be an
+#: explicit decision. `ledger.py` owns a file because the judgements the user has
+#: already made have to live somewhere; `execute.py` writes the restore file and
+#: issues the deletions, which cannot be done without a clock, a path and the API.
+#: Nothing in the pure path may import either, so the pairs the ledger stores can
+#: only reach the planner as a plain argument passed by the command layer.
+IO_OWNING_MODULES = ("ledger.py", "execute.py")
 
 
-@pytest.mark.parametrize(
-    "module",
-    sorted(p.name for p in DEDUPE_PACKAGE.glob("*.py") if p.name not in IMPURE_BY_DESIGN),
-)
-def test_the_planner_cannot_reach_the_io_shell(module):
+def _imports_of(module: str) -> set[str]:
     tree = ast.parse((DEDUPE_PACKAGE / module).read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -48,9 +46,41 @@ def test_the_planner_cannot_reach_the_io_shell(module):
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module or "")
             imported.update(alias.name for alias in node.names)
-    for name in imported:
+    return imported
+
+
+PURE_MODULES = sorted(
+    p.name for p in DEDUPE_PACKAGE.glob("*.py") if p.name not in IO_OWNING_MODULES
+)
+
+
+@pytest.mark.parametrize("module", PURE_MODULES)
+def test_the_planner_cannot_reach_the_io_shell(module):
+    for name in _imports_of(module):
         head = name.split(".")[0]
         assert head not in FORBIDDEN_IMPORTS, f"{module} imports {name!r}"
+
+
+@pytest.mark.parametrize("module", PURE_MODULES)
+def test_nothing_in_the_pure_path_reads_the_ledger_file(module):
+    """The planner takes asserted-distinct pairs as a value, never as a file.
+
+    If `planner.py` ever imported `ledger`, every suppression test above would stop
+    proving what it claims: the seam would depend on the state directory rather than
+    on its arguments.
+    """
+    for name in _imports_of(module):
+        assert "ledger" not in name.split("."), f"{module} imports {name!r}"
+
+
+def test_only_the_named_modules_in_the_package_own_a_file():
+    """A new I/O-owning module must be a deliberate decision, not a slow drift."""
+    io_owning = {
+        p.name
+        for p in DEDUPE_PACKAGE.glob("*.py")
+        if {"pathlib", "json"} & {n.split(".")[0] for n in _imports_of(p.name)}
+    }
+    assert io_owning == set(IO_OWNING_MODULES)
 
 
 def test_the_printed_plan_shows_every_group_with_its_reasoning(real_plan):
